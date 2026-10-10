@@ -24,24 +24,27 @@ const INCIDENTAL: &[&[&str]] = &[
 ];
 
 thread_local! {
-    static CAPTURE: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
+    /// Nested capture frames: evidence wraps an operation's payload, and the
+    /// MCP server wraps the whole invocation, including the evidence record.
+    static CAPTURE: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn begin_capture() {
-    CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    CAPTURE.with(|c| c.borrow_mut().push(Vec::new()));
 }
 
 pub(super) fn end_capture() -> Vec<Value> {
-    CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+    CAPTURE.with(|c| c.borrow_mut().pop().unwrap_or_default())
 }
 
 pub(super) fn capturing() -> bool {
-    CAPTURE.with(|c| c.borrow().is_some())
+    CAPTURE.with(|c| !c.borrow().is_empty())
 }
 
-/// Called by `emit`: true when the payload was captured instead of printed.
+/// Called by `emit`: true when the value went to the innermost capture frame
+/// instead of stdout.
 pub(super) fn capture(value: &Value) -> bool {
-    CAPTURE.with(|c| match c.borrow_mut().as_mut() {
+    CAPTURE.with(|c| match c.borrow_mut().last_mut() {
         Some(captured) => {
             captured.push(value.clone());
             true

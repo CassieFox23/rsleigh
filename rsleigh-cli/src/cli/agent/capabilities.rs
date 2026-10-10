@@ -236,6 +236,7 @@ pub(super) fn usage() -> String {
     }
     text.push_str(
         "\nTarget-free:\n  rsleigh --help | --version [--json] | --capabilities [--json]\n\
+         \x20 rsleigh --mcp                 Model Context Protocol server on stdio\n\
          Agent exits: 0 complete, 2 partial evidence, 1 failed.\n\
          Paths beginning with '-' must be written as ./NAME.\n",
     );
@@ -296,6 +297,10 @@ pub(super) fn run_target_free(args: &[String]) -> Result<u8, AgentError> {
             } else {
                 println!("rsleigh {}", env!("CARGO_PKG_VERSION"));
             }
+        }
+        "--mcp" => {
+            only(&[])?;
+            return super::mcp::serve();
         }
         "--capabilities" => {
             only(&["--json"])?;

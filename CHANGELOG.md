@@ -34,6 +34,10 @@ All notable user-facing changes to rsleigh are documented here.
   Only code dimensions establish `changed`. A pseudocode-only difference is
   explained as decompiler context.
 - `agent_re_eval --workflows`: seven end-to-end workflow tasks in CI.
+- `rsleigh --mcp`: a Model Context Protocol server on stdio that exposes
+  `capabilities`, `agent-brief`, `card`, `ssa-slice`, and `verify-bundle`.
+  Tool schemas are generated from the operation catalog, and each result is
+  the CLI's JSON document with the same error codes and evidence IDs.
 
 ### Changed
 

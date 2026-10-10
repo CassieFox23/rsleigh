@@ -23,6 +23,10 @@ jq '.operations[] | {id, usage, schema}' capabilities.json
 jq '.architectures[] | {id, stages, dependency_queries}' capabilities.json
 ```
 
+An MCP client can run `rsleigh --mcp` instead and call the same operations as
+tools; results are the same JSON documents (see
+[Serve operations over MCP](cli-reference.md#serve-operations-over-mcp)).
+
 For a parsed PE, ELF, or Mach-O target:
 
 ```bash

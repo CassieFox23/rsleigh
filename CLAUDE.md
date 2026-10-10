@@ -73,6 +73,7 @@ rsleigh <binary> <func> --card --evidence-store S   # content-addressed rsleigh.
 rsleigh <binary> --export-bundle B --evidence-store S   # then [<binary>] --verify-bundle B / --import-bundle B
 rsleigh <binary> --investigate D --question TEXT        # then [<binary>] --investigation D [--handoff | --expect-revision N --ACTION]
 rsleigh <old> --compare <new> [--pair A:B] --json       # per-dimension function comparison (--diff renders same model)
+rsleigh --mcp                                           # MCP stdio server: capabilities, agent-brief, card, ssa-slice, verify-bundle
 ```
 
 ## Layout
@@ -127,6 +128,7 @@ See `docs/decompiler-passes.md` for full pass list. Hotspots:
 - Flag `role` decides evidence identity: only `semantic` flags enter `rsleigh.evidence/v1` content IDs (cache/budget/output/evidence flags do not). Canonicalization excludes `INCIDENTAL` payload paths in `evidence.rs`; changing it needs a new canonicalization version.
 - A mode flag reused as another op's modifier (`--investigation` on `--export-bundle`/`--import-bundle`) is dropped from mode candidates in `dispatch`.
 - Investigation revisions: `revisions/NNNNNN.json` (hard-link claim) are authoritative; `investigation.json` is a mirror.
+- `mcp.rs` is transport only: tool schemas come from the catalog and calls go through `invoke` (same validation, worker, evidence, failure envelope). Stdout must carry only JSON-RPC, so agent JSON output must go through `emit` (captured), never `println!`.
 - `compare.rs` decompiles the reachable body only (whole-window decompile pulls unreachable padding into signature inference); P-code `Unique` offsets encode the instruction address and are renumbered.
 
 ### Signatures + discovery
