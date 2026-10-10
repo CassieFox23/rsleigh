@@ -715,22 +715,6 @@ fn store_records(root: &Path, doc: &Value) -> BTreeMap<String, Value> {
         .collect()
 }
 
-/// The recorded binary path, only when it names a local file whose SHA-256 is
-/// the investigation target. An imported hint is otherwise an arbitrary string
-/// (a UNC path, for one, would send credentials to its host when run).
-fn verified_hint(doc: &Value) -> Option<String> {
-    let hint = doc["file_hint"].as_str()?;
-    if hint.starts_with("\\\\") || hint.starts_with("//") || hint.chars().any(char::is_control) {
-        return None;
-    }
-    let path = Path::new(hint);
-    if !path.metadata().ok()?.is_file() {
-        return None;
-    }
-    let data = std::fs::read(path).ok()?;
-    (doc["target"]["binary_sha256"] == compute_sha256(&data)).then(|| hint.to_string())
-}
-
 fn view(
     root: &Path,
     doc: &Value,
@@ -757,10 +741,10 @@ fn view(
             None => json!({"id":id,"available":false}),
         })
         .collect();
-    let file = file
-        .map(str::to_string)
-        .or_else(|| verified_hint(doc))
-        .unwrap_or_else(|| "FILE".into());
+    // Commands name only the binary supplied on this command line. The
+    // recorded file_hint is never read or substituted: an imported document
+    // could point it at a network path (UNC, or an automounted /net host).
+    let file = file.map(str::to_string).unwrap_or_else(|| "FILE".into());
     // A leading '-' would be parsed as an option even when quoted.
     let file = if file.starts_with('-') {
         format!("./{file}")
@@ -1469,15 +1453,15 @@ mod tests {
         tampered["file_hint"] = json!("a.exe\n## Injected");
         assert!(validate_document(&tampered).is_err());
 
-        // A hint that is not the target binary never reaches a command.
-        for hint in [
-            "\\\\attacker\\share\\a.exe",
-            "//attacker/share/a.exe",
-            "Cargo.toml",
-        ] {
-            let mut hinted = document.clone();
-            hinted["file_hint"] = json!(hint);
-            assert_eq!(verified_hint(&hinted), None, "{hint}");
+        // A recorded hint never reaches a command or the filesystem.
+        let mut hinted = document.clone();
+        hinted["file_hint"] = json!("\\\\attacker\\share\\a.exe");
+        let shown = view(Path::new("inv"), &hinted, &[], None).unwrap();
+        let queries = shown["next_queries"].as_array().unwrap();
+        assert!(!queries.is_empty());
+        for query in queries {
+            let command = query["command"].as_str().unwrap();
+            assert!(command.starts_with("rsleigh 'FILE' "), "{command}");
         }
 
         // PowerShell treats typographic quotes as quotes.

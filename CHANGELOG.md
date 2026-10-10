@@ -25,9 +25,9 @@ All notable user-facing changes to rsleigh are documented here.
   distinct from withdrawals, platform-aware next queries, and Markdown handoff.
   Investigation documents are treated as untrusted. Suggested commands quote
   every argument other than catalog flags, numbers, and addresses (including
-  PowerShell typographic quotes), and use a recorded binary path only if it
-  hashes to the target. Malformed boundary or requirement fields fail
-  verification, and handoff text is escaped.
+  PowerShell typographic quotes), and never read or substitute the recorded
+  binary path. Malformed boundary or requirement fields fail verification,
+  and handoff text is escaped.
 - `--compare NEW` (`rsleigh.function-comparison/v1`): per-dimension
   bytes/instructions/calls/strings/CFG/pseudocode comparison with explicit
   `unknown`, ambiguous, unmatched, and suggested-but-unestablished pairs.
