@@ -31,6 +31,8 @@ All notable user-facing changes to rsleigh are documented here.
 - `--compare NEW` (`rsleigh.function-comparison/v1`): per-dimension
   bytes/instructions/calls/strings/CFG/pseudocode comparison with explicit
   `unknown`, ambiguous, unmatched, and suggested-but-unestablished pairs.
+  Only code dimensions establish `changed`. A pseudocode-only difference is
+  explained as decompiler context.
 - `agent_re_eval --workflows`: seven end-to-end workflow tasks in CI.
 
 ### Changed

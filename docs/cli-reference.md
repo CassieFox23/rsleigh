@@ -187,9 +187,20 @@ calling conventions make every dimension except `bytes` `unknown`
 (`incompatible_profile`). Undecodable targets, truncated bodies
 (`body_truncated`), indirect jumps, unresolved indirect calls, and failed
 decompilation are propagated as `unknown`; an unchanged prefix of incomplete
-evidence is never `unchanged`. A pair is `changed` if any representation
-dimension changed; raw-byte-only changes are `unchanged` with a relocation
-explanation only when every normalized dimension is unchanged.
+evidence is never `unchanged`.
+
+The verdict combines the dimensions as follows. Only a code dimension
+(`instructions`, `calls`, `strings`, or `cfg`) can make a pair `changed`. Any
+`unknown` dimension keeps the verdict `unknown`. When every dimension is
+established, two differences are explained in `explanation` without counting as
+a change:
+
+- Raw-byte differences: relocation.
+- Pseudocode differences: the decompiler works from the same instructions plus
+  context such as callee names and library signatures, so a pseudocode-only
+  difference reflects that context, not a code change.
+
+The `pseudocode` dimension still reports `changed` and its diff.
 
 Unmatched functions are `absent` only when the other binary's inventory is
 complete (an unstripped ELF symbol table); PE exports, Mach-O, and heuristic

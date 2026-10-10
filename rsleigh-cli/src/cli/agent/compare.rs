@@ -658,13 +658,28 @@ fn line_diff(old: &[String], new: &[String]) -> Option<Vec<(char, String)>> {
     Some(out)
 }
 
+/// Dimensions read directly from the reachable instructions. Pseudocode is
+/// derived from the same instructions plus decompiler context (callee names,
+/// library signatures), so it can explain a change but never establish one.
+const CODE: [&str; 4] = ["instructions", "calls", "strings", "cfg"];
+
 /// Aggregate per-dimension results into one verdict with an explanation.
-/// A definite change in any representation dimension wins. Raw byte changes
-/// count as relocation only when every normalized dimension is unchanged.
+/// Only a code dimension can make a pair `changed`. Any `unknown` dimension
+/// keeps the verdict `unknown`. With every dimension established, raw-byte
+/// and pseudocode differences are explained, not counted.
 fn pair_verdict(dimensions: &serde_json::Map<String, Value>) -> (&'static str, String) {
     let result = |name: &str| dimensions[name]["result"].as_str().unwrap_or("unknown");
-    if let Some(changed) = REPRESENTATION.iter().find(|d| result(d) == "changed") {
+    if let Some(changed) = CODE.iter().find(|d| result(d) == "changed") {
         return ("changed", format!("{changed} changed"));
+    }
+    let mut differs = Vec::new();
+    if result("bytes") == "changed" {
+        differs.push(
+            "raw bytes differ only at references that normalize to the same targets (relocation)",
+        );
+    }
+    if result("pseudocode") == "changed" {
+        differs.push("pseudocode differs although instructions, calls, strings, and CFG are unchanged (decompiler context such as callee names or signatures)");
     }
     let unknown: Vec<String> = DIMENSIONS
         .iter()
@@ -677,24 +692,17 @@ fn pair_verdict(dimensions: &serde_json::Map<String, Value>) -> (&'static str, S
         })
         .collect();
     if !unknown.is_empty() {
-        let bytes = if result("bytes") == "changed" {
-            "raw bytes changed; "
-        } else {
-            ""
-        };
+        let noted: String = differs.iter().map(|d| format!("{d}; ")).collect();
         return (
             "unknown",
-            format!("{bytes}not established: {}", unknown.join(", ")),
+            format!("{noted}not established: {}", unknown.join(", ")),
         );
     }
-    if result("bytes") == "changed" {
-        return (
-            "unchanged",
-            "raw bytes differ only at references that normalize to the same targets (relocation)"
-                .into(),
-        );
+    if differs.is_empty() {
+        ("unchanged", "every dimension unchanged".into())
+    } else {
+        ("unchanged", differs.join("; "))
     }
-    ("unchanged", "every dimension unchanged".into())
 }
 
 fn compare_pair(old: &Side, new: &Side, a: &Facts, b: &Facts, compatible: bool) -> Value {
@@ -1237,6 +1245,14 @@ mod tests {
         assert_eq!(
             pair_verdict(&dims([u, "unknown", "changed", u, u, u])).0,
             "changed"
+        );
+        // Pseudocode alone never establishes a change.
+        let context = pair_verdict(&dims(["changed", u, u, u, u, "changed"]));
+        assert_eq!(context.0, "unchanged");
+        assert!(context.1.contains("relocation") && context.1.contains("decompiler context"));
+        assert_eq!(
+            pair_verdict(&dims([u, "unknown", u, u, u, "changed"])).0,
+            "unknown"
         );
     }
 
