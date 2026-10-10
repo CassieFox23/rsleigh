@@ -3,7 +3,10 @@
 All fixtures are original hand-encoded programs under Apache-2.0, the repository
 license. [corpus.rs](corpus.rs) generates the complete inputs deterministically;
 [seed.asm](seed.asm) and [seed.rs](seed.rs) describe the original PE fixture, and
-[traversal.rs](traversal.rs) describes the memory/helper fixture. No downloaded
+[traversal.rs](traversal.rs) describes the memory/helper fixture, and
+[variants.rs](variants.rs) derives the relocated, changed-constant,
+changed-callee, duplicate-name, renamed, indirect-call, and truncated seed
+variants used by comparison and investigation workflows. No downloaded
 binaries, assembler, compiler, solver, or model service is required.
 
 ELF inputs contain a native-class header, executable section/segment, and

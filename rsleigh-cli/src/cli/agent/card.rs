@@ -2,37 +2,17 @@ use super::*;
 
 mod analysis;
 
-pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8, String> {
+pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8, AgentError> {
     let _execution = execution_scope(args)?;
-    let values = [
-        "--instruction-cursor",
-        "--operation-cursor",
-        "--limit",
-        "--analysis-cache",
-        "--max-decode-instructions",
-        "--max-ssa-work",
-        "--deadline-ms",
-    ];
-    let mut targets = Vec::new();
-    let mut i = 2;
-    while i < args.len() {
-        if values.contains(&args[i].as_str()) {
-            i += 2;
-            continue;
-        }
-        match args[i].as_str() {
-            "--card" | "--json" | "--pcode" | "--decompile" => {}
-            a if a.starts_with("--") => return Err(format!("unsupported card option: {a}")),
-            _ => targets.push(args[i].as_str()),
-        }
-        i += 1;
-    }
+    // The catalog is the only flag parser; it returns the FUNCTION positionals.
+    let targets = contracts::validate(contracts::find("--card").expect("card contract"), args, 2)?;
     if targets.len() != 1 {
-        return Err("--card requires exactly one function name or address".to_string());
+        return Err(AgentError::new(
+            "invalid_target",
+            "--card requires exactly one function name or address",
+        ));
     }
-    let obj = parse_object_lenient(data).map_err(|e| e.to_string())?;
-    let (arch, segs, symbols) =
-        agent_symbols(&obj, data).ok_or("unsupported binary format or architecture")?;
+    let (obj, arch, segs, symbols) = parse_native(data)?;
     let address = resolve_target(targets[0], &symbols)?;
     let name = symbols
         .iter()
@@ -73,14 +53,20 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
     let instruction_cursor = number_arg(args, "--instruction-cursor", 0)?;
     let operation_cursor = number_arg(args, "--operation-cursor", 0)?;
     if !include_pcode && operation_cursor != 0 {
-        return Err("--operation-cursor requires --pcode".to_string());
+        return Err(AgentError::new(
+            "invalid_combination",
+            "--operation-cursor requires --pcode",
+        ));
     }
     let total_ops = instructions
         .iter()
         .map(|inst| inst.operations.len())
         .sum::<usize>();
     if instruction_cursor > instructions.len() || operation_cursor > total_ops {
-        return Err("cursor is beyond the end of this function's evidence".to_string());
+        return Err(AgentError::new(
+            "invalid_cursor",
+            "cursor is beyond the end of this function's evidence",
+        ));
     }
     let instruction_end = instruction_cursor
         .saturating_add(AGENT_CARD_MAX_INSTRUCTIONS)
@@ -160,7 +146,7 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
             "text":&pseudocode[..pseudo_end],"bytes_total":pseudocode.len(),"bytes_cap":AGENT_CARD_MAX_PSEUDOCODE_BYTES,
             "truncated":pseudo_end < pseudocode.len()}) } else { Value::Null }
     });
-    if args.iter().any(|a| a == "--json") {
+    if args.iter().any(|a| a == "--json") || evidence::capturing() {
         emit(&payload);
     } else {
         render_text(&payload);
@@ -168,13 +154,15 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
     Ok(status_exit(status))
 }
 
-pub(super) fn resolve_target(target: &str, symbols: &[(u64, String)]) -> Result<u64, String> {
+pub(super) fn resolve_target(target: &str, symbols: &[(u64, String)]) -> Result<u64, AgentError> {
     target
         .strip_prefix("0x")
         .or_else(|| target.strip_prefix("0X"))
         .and_then(|s| u64::from_str_radix(s, 16).ok())
         .or_else(|| symbols.iter().find(|(_, n)| n == target).map(|(a, _)| *a))
-        .ok_or_else(|| format!("function '{target}' not found"))
+        .ok_or_else(|| {
+            AgentError::new("target_not_found", format!("function '{target}' not found"))
+        })
 }
 
 fn page(start: usize, end: usize, total: usize, cap: usize) -> Value {

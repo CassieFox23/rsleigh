@@ -22,15 +22,70 @@ rsleigh ./sample.exe 0x140001000 --card --pcode
   `--sigcheck` separately; combining them does not run both producers.
 - Modifiers apply only to the modes that document them. `--json` is not a
   universal output switch; `--limit` controls the agent brief/index, not every
-  command. Unknown flags may be ignored instead of rejected.
-- For local usage text, invoke `rsleigh` without arguments: it writes usage to
-  stderr and exits nonzero. The current CLI treats `--help` and `--version` as
-  input filenames. Record the package version from installation metadata or
-  the source commit used to build it.
+  command. Agent operations reject flags outside their contract with
+  `error_code: "unsupported_option"`; legacy modes may still ignore unknown flags.
+- `rsleigh --help` writes usage to stdout and exits 0. Invoking `rsleigh`
+  without arguments still writes usage to stderr and exits 1.
+  `rsleigh --version` prints the package version; `--version --json` adds the
+  linked build identity. A first argument beginning with `-` is always an
+  option, so write a file named `--help` as `./--help`.
 - `--features smt` is a Cargo build option, never an `rsleigh` runtime option.
 
 The tables below show the supported combinations to use. They are a task guide,
 not a promise that arbitrary combinations of flags compose.
+
+## Discover supported operations
+
+```bash
+rsleigh --capabilities --json > capabilities.json
+rsleigh --capabilities            # the same catalog as text
+```
+
+Discovery is target-free: it reads no binary and builds no SSA. The
+`rsleigh.capabilities/v1` catalog is generated from the same typed contracts
+that validate agent invocations, so an accepted flag cannot be missing from it.
+Each `operations[]` entry lists its schema, generated `usage`, typed `flags`
+(`kind`: switch, count, address, function, path, or text), `effects` such as
+`writes_cache`, output `limits`, and runnable `examples` with their accepted
+exit statuses. Placeholders are `FILE`, `FUNCTION`, and `DIR`.
+
+Availability and quality are reported separately. `frontends[]` lists which
+operations each input frontend implements; raw images and WASM list none.
+`architectures[]` reports per-stage quality (`tested` or `partial`) and
+dependency-query support. For example, MIPS32 and RISC-V scalar returns are
+`supported`, while their call-argument selectors and helper argument binding
+are `unsupported` and fail with `selection_error.code: "unsupported_root"`.
+
+Agent failures keep `status: "failed"`, `error`, and a `command` diagnostic,
+and add a stable `error_code`:
+
+| `error_code` | Meaning |
+|---|---|
+| `multiple_modes` | More than one operation was selected |
+| `unknown_option` | A target-free invocation named no known operation |
+| `unsupported_option` | The flag is not part of the selected operation's contract |
+| `unexpected_argument` | A positional argument is not accepted here |
+| `missing_value` | A flag that requires a value has none |
+| `duplicate_option` | A non-repeatable flag appears more than once |
+| `invalid_value` | A flag value has the wrong type or range |
+| `invalid_selector` | Slice root flags do not select exactly one root |
+| `invalid_combination` | Individually valid flags cannot be combined |
+| `invalid_target` | The function target is missing, repeated, or malformed |
+| `target_not_found` | No discovered function matches the target |
+| `invalid_cursor` | A pagination cursor is beyond the available evidence |
+| `unsupported_input` | The input frontend does not implement agent operations |
+| `input_unreadable` | The binary or a referenced file cannot be read |
+| `unsupported_format` | The container or architecture is not supported |
+| `verification_failed` | Stored evidence failed an integrity or identity check |
+| `missing_evidence` | Referenced evidence is unavailable in the store or bundle |
+| `stale_revision` | The investigation changed since the expected revision |
+| `requirements_unmet` | Cited evidence does not satisfy the question's requirements |
+| `write_failed` | Publishing output files failed; previous output is unchanged |
+| `analysis_failed` | Analysis could not produce any evidence |
+| `command_failed` | Unclassified failure; inspect the error message |
+
+Codes are stable; messages may change. Exit statuses are unchanged: 0 complete,
+2 partial evidence, 1 failed.
 
 ## Map and select functions
 
@@ -77,11 +132,71 @@ Cards and slices support `--analysis-cache DIR`, `--max-decode-instructions N`,
 Slices also support `--max-call-depth N`, `--max-functions N`, and
 `--max-traversal-work N`; defaults are 2, 16, and 100,000 respectively.
 `--verify-index DIR` checks version 2 generation identity and artifact checksums.
+Briefs, cards, and slices accept `--evidence`, `--evidence-store STORE`, and
+`--derived-from ID` to emit or persist content-addressed evidence records;
+`--export-bundle BUNDLE --evidence-store STORE [--record ID]...`,
+`[FILE] --verify-bundle BUNDLE`, and `--import-bundle BUNDLE --evidence-store STORE`
+move them between sessions. See [portable evidence](agent-workflow.md#portable-evidence).
+`FILE --investigate DIR --question TEXT` starts a durable investigation;
+`[FILE] --investigation DIR` shows it (`--handoff` for Markdown) or applies one
+`--expect-revision N` update. Export it with
+`FILE --export-bundle BUNDLE --investigation DIR` and import it with
+`--import-bundle BUNDLE --investigation NEW_DIR`. See
+[tracking questions](agent-workflow.md#track-questions-across-sessions).
 Agent commands exit 0 on completion, 2 for partial evidence, and 1 on failure.
 P-code/SSA JSON dumps are not capped like cards. SSA dumps retain legacy
 inspection fields alongside typed expressions. Save a full-function
 dump to a file, select the relevant instructions/blocks, and preserve its
 address and command. See [output formats](output-formats.md).
+
+## Compare two builds
+
+```bash
+rsleigh old.bin --compare new.bin --json                     # every uniquely named function
+rsleigh old.bin --compare new.bin --pair parse --pair 0x401000:0x402000 --json
+rsleigh old.bin --diff new.bin                               # legacy colored text, same model
+```
+
+`--compare NEW` emits `rsleigh.function-comparison/v1` with `--json` and text
+otherwise. Pairs come from `--pair OLD[:NEW]` (a name or `0x` address per side;
+a bare target names both sides; `::` in C++ names is not a separator) or, by
+default, from names that are unique and not address-derived (`FUN_`, `sub_`,
+...) in both binaries. Duplicate names are reported as `ambiguous`; an explicit
+request that is ambiguous or missing is reported under `unresolved_requests`.
+Identical body bytes may produce `suggestions` for unmatched functions, always
+with `established: false`; they never become pairs. `--limit N` bounds compared
+pairs (default 100, cap 10,000).
+
+Each pair reports six dimensions as `changed`, `unchanged`, or `unknown` with a
+reason:
+
+| Dimension | Compared evidence |
+|---|---|
+| `bytes` | Raw bytes of the reachable body (trailing padding excluded) |
+| `instructions` | Raw P-code with function-relative locations, renumbered temporaries, and mapped references |
+| `calls` | Direct callees as imports, matched pairs, or shared unique symbols; indirect calls counted |
+| `strings` | Strings recovered from the body's pseudocode |
+| `cfg` | Block successor structure, independent of block sizes and addresses |
+| `pseudocode` | Pseudocode of the reachable body with own name and address-derived labels normalized; bounded line diff |
+
+A reference is mapped only when justified: inside the function, an import, a
+matched pair, or a symbol name unique in both binaries. Equal virtual addresses
+alone never identify the same function. A difference only at unmapped
+references is `unknown` (`unmapped_reference`). Incompatible architectures or
+calling conventions make every dimension except `bytes` `unknown`
+(`incompatible_profile`). Undecodable targets, truncated bodies
+(`body_truncated`), indirect jumps, unresolved indirect calls, and failed
+decompilation are propagated as `unknown`; an unchanged prefix of incomplete
+evidence is never `unchanged`. A pair is `changed` if any representation
+dimension changed; raw-byte-only changes are `unchanged` with a relocation
+explanation only when every normalized dimension is unchanged.
+
+Unmatched functions are `absent` only when the other binary's inventory is
+complete (an unstripped ELF symbol table); PE exports, Mach-O, and heuristic
+discovery are partial, so their unmatched names are `unknown`. The result is
+`partial` (exit 2) when pairs are truncated or any verdict, inventory, or
+request is unresolved. Unreadable or unparseable input fails (exit 1).
+Comparison is evidence comparison, not proof of semantic equivalence.
 
 ## Triage file contents
 

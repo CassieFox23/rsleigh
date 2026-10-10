@@ -273,18 +273,36 @@ fn finding_sort_key(record: &rsleigh_decompile::finding::FindingRecord) -> (u8, 
     (severity, confidence)
 }
 
+type NativeImage<'a> = (
+    goblin::Object<'a>,
+    rsleigh_api::Architecture,
+    Vec<(u64, u64, u64)>,
+    Vec<(u64, String)>,
+);
+
+/// Parse a PE/ELF/Mach-O container and its discovered function map.
+fn parse_native(data: &[u8]) -> Result<NativeImage<'_>, AgentError> {
+    let obj = parse_object_lenient(data)
+        .map_err(|e| AgentError::new("unsupported_format", e.to_string()))?;
+    let (arch, segs, symbols) = agent_symbols(&obj, data).ok_or_else(|| {
+        AgentError::new(
+            "unsupported_format",
+            "unsupported binary format or architecture",
+        )
+    })?;
+    Ok((obj, arch, segs, symbols))
+}
+
 fn build_agent_analysis(
     binary_path: &str,
     data: &[u8],
     function_limit: usize,
     finding_limit: usize,
-) -> Result<AgentAnalysis, String> {
+) -> Result<AgentAnalysis, AgentError> {
     use pcode_ir::{AddressSpaceId, PcodeOp};
     use rsleigh_decompile::finding::{FindingConfidence, FindingRecord, FindingStage};
 
-    let obj = parse_object_lenient(data).map_err(|error| error.to_string())?;
-    let (arch, segs, symbols) = agent_symbols(&obj, data)
-        .ok_or_else(|| "unsupported binary format or architecture".to_string())?;
+    let (obj, arch, segs, symbols) = parse_native(data)?;
     let (format, imagebase) = agent_format_and_base(&obj, &segs);
     let import_map = build_import_map(&obj, data);
     let import_names: std::collections::HashSet<String> = import_map.values().cloned().collect();
@@ -490,17 +508,39 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+mod bundle;
 mod cache;
+mod capabilities;
 mod card;
+mod compare;
+mod contracts;
+mod evidence;
 mod index;
+mod investigation;
 mod slice;
 
-fn execution_scope(args: &[String]) -> Result<rsleigh_decompile::budget::Scope, String> {
-    let number = |flag| -> Result<Option<u64>, String> {
+use contracts::AgentError;
+
+/// Legacy `--diff`: rendered from the structured comparison model.
+pub(super) fn legacy_diff(old_path: &str, new_path: &str, functions: &[String]) {
+    compare::legacy(old_path, new_path, functions)
+}
+
+/// Usage text shared by bare invocation (stderr, exit 1) and `--help`.
+pub(super) fn usage() -> String {
+    capabilities::usage()
+}
+
+fn execution_scope(args: &[String]) -> Result<rsleigh_decompile::budget::Scope, AgentError> {
+    let number = |flag| -> Result<Option<u64>, AgentError> {
         value_arg(args, flag)?
             .map(|v| {
-                v.parse::<u64>()
-                    .map_err(|_| format!("{flag} requires an unsigned integer"))
+                v.parse::<u64>().map_err(|_| {
+                    AgentError::new(
+                        "invalid_value",
+                        format!("{flag} requires an unsigned integer"),
+                    )
+                })
             })
             .transpose()
     };
@@ -572,30 +612,54 @@ fn recover_decompile(f: impl FnOnce() -> String, diagnostics: &mut Vec<Value>) -
     }
 }
 
-fn value_arg<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>, String> {
+fn value_arg<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>, AgentError> {
     let mut matches = args.iter().enumerate().filter(|(_, a)| a.as_str() == flag);
     let Some((i, _)) = matches.next() else {
         return Ok(None);
     };
     if matches.next().is_some() {
-        return Err(format!("duplicate {flag}"));
+        return Err(AgentError::new(
+            "duplicate_option",
+            format!("duplicate {flag}"),
+        ));
     }
     args.get(i + 1)
         .filter(|a| !a.starts_with("--"))
         .map(|a| Some(a.as_str()))
-        .ok_or_else(|| format!("{flag} requires a value"))
+        .ok_or_else(|| AgentError::new("missing_value", format!("{flag} requires a value")))
 }
 
-fn number_arg(args: &[String], flag: &str, default: usize) -> Result<usize, String> {
+/// Every value of a repeatable flag, in argument order.
+fn values_arg<'a>(args: &'a [String], flag: &str) -> Result<Vec<&'a str>, AgentError> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, a)| a.as_str() == flag)
+        .map(|(i, _)| {
+            args.get(i + 1)
+                .filter(|a| !a.starts_with("--"))
+                .map(String::as_str)
+                .ok_or_else(|| AgentError::new("missing_value", format!("{flag} requires a value")))
+        })
+        .collect()
+}
+
+fn number_arg(args: &[String], flag: &str, default: usize) -> Result<usize, AgentError> {
     value_arg(args, flag)?
         .map(|s| {
-            s.parse::<usize>()
-                .map_err(|_| format!("{flag} requires an unsigned integer"))
+            s.parse::<usize>().map_err(|_| {
+                AgentError::new(
+                    "invalid_value",
+                    format!("{flag} requires an unsigned integer"),
+                )
+            })
         })
         .unwrap_or(Ok(default))
 }
 
 fn emit(value: &Value) {
+    if evidence::capture(value) {
+        return;
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(value).expect("JSON value is serializable")
@@ -629,7 +693,7 @@ fn file_identity(binary_path: &str, data: &[u8], analysis: &AgentAnalysis) -> Va
     })
 }
 
-fn run_agent_brief(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8, String> {
+fn run_agent_brief(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8, AgentError> {
     let limit = requested_agent_limit(
         args,
         AGENT_BRIEF_DEFAULT_FUNCTIONS,
@@ -640,12 +704,21 @@ fn run_agent_brief(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8
         .functions
         .first()
         .map(|f| {
-            let binary = shell_quote(binary_path);
-            vec![
-                format!("rsleigh {binary} --xrefs 0x{:x}", f.address),
-                format!("rsleigh {binary} 0x{:x} --card --json --pcode", f.address),
-                format!("rsleigh {binary} --ssa-json 0x{:x}", f.address),
+            let address = format!("0x{:x}", f.address);
+            [
+                vec!["--xrefs", &address],
+                vec![&address, "--card", "--json", "--pcode"],
+                vec!["--ssa-json", &address],
             ]
+            .into_iter()
+            .map(|tail| {
+                let argv: Vec<String> = std::iter::once(binary_path)
+                    .chain(tail)
+                    .map(str::to_string)
+                    .collect();
+                investigation::render_command(&argv, investigation::Shell::Posix)
+            })
+            .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let status = analysis_status(&analysis);
@@ -665,156 +738,143 @@ fn run_agent_brief(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8
     Ok(status_exit(status))
 }
 
+/// Route a validated operation to its handler. `data` is the binary when the
+/// invocation supplied one.
+fn run_operation(
+    op: &contracts::Operation,
+    args: &[String],
+    data: Option<&[u8]>,
+) -> Result<u8, AgentError> {
+    let binary =
+        || data.ok_or_else(|| AgentError::new("invalid_target", "this operation requires FILE"));
+
+    match op.id {
+        "agent-brief" => run_agent_brief(&args[1], binary()?, args),
+        "index" => index::build(
+            &args[1],
+            binary()?,
+            args,
+            value_arg(args, "--index")?.expect("validated mode value"),
+        ),
+        "verify-index" => index::verify(
+            binary()?,
+            value_arg(args, "--verify-index")?.expect("validated mode value"),
+        ),
+        "card" => card::run(&args[1], binary()?, args),
+        "ssa-slice" => slice::run(binary()?, args),
+        "export-bundle" => bundle::export(binary()?, args),
+        "compare" => compare::run(&args[1], binary()?, args),
+        "verify-bundle" => bundle::verify(data, args, investigation::validate_bundle),
+        "import-bundle" => bundle::import(data, args, investigation::validate_bundle, |b| {
+            investigation::import(b, args)
+        }),
+        "investigate" => investigation::create(&args[1], binary()?, args),
+        "investigation" => investigation::run(data.map(|d| (args[1].as_str(), d)), args),
+        other => Err(AgentError::new(
+            "command_failed",
+            format!("operation {other} has no handler"),
+        )),
+    }
+}
+
 /// Agent modes use one result/exit contract, including worker-thread panics.
 /// 0 = completed, 2 = partial evidence, 1 = failed command.
 pub(super) fn dispatch(args: &[String]) -> bool {
-    let modes = [
-        "--agent-brief",
-        "--card",
-        "--index",
-        "--verify-index",
-        "--ssa-slice",
-    ];
-    let selected: Vec<_> = modes
-        .iter()
-        .filter(|m| args.iter().any(|a| a == **m))
-        .copied()
-        .collect();
-    if selected.is_empty() {
+    let target_free =
+        args.len() > 1 && (args[1].starts_with("--") || matches!(args[1].as_str(), "-h" | "-V"));
+    let selected: Vec<&contracts::Operation> = if target_free {
+        contracts::OPERATIONS
+            .iter()
+            .filter(|op| op.target != contracts::Target::Binary && op.mode.name == args[1])
+            .collect()
+    } else {
+        let candidates: Vec<&contracts::Operation> = contracts::OPERATIONS
+            .iter()
+            .filter(|op| op.target != contracts::Target::None)
+            .filter(|op| args.iter().skip(2).any(|a| a == op.mode.name))
+            .collect();
+        // A mode flag that another selected operation accepts as an ordinary
+        // modifier (e.g. --investigation on --export-bundle) is not a mode.
+        candidates
+            .iter()
+            .copied()
+            .filter(|op| {
+                !candidates.iter().any(|other| {
+                    other.id != op.id && other.flags.iter().any(|f| f.name == op.mode.name)
+                })
+            })
+            .collect()
+    };
+    if selected.is_empty() && !target_free {
         return false;
     }
-    let schema = match selected[0] {
-        "--agent-brief" => "rsleigh.agent-brief/v1",
-        "--card" => "rsleigh.card/v2",
-        "--index" => "rsleigh.index/v2",
-        "--verify-index" => "rsleigh.index-verification/v1",
-        _ => "rsleigh.ssa-slice/v3",
-    };
+    let schema = selected
+        .first()
+        .map(|op| op.schema)
+        .unwrap_or(capabilities::SCHEMA);
     let args = args.to_vec();
-    let mode = selected[0];
     let result = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || {
+        .spawn(move || -> Result<u8, AgentError> {
+            let Some(op) = selected.first().copied() else {
+                return capabilities::run_target_free(&args);
+            };
             if selected.len() != 1 {
-                return Err("select exactly one agent mode".to_string());
+                return Err(AgentError::new(
+                    "multiple_modes",
+                    "select exactly one agent mode",
+                ));
             }
             if args.iter().any(|a| a == "--raw") {
-                return Err("agent modes require PE, ELF, or Mach-O input".to_string());
+                return Err(AgentError::new(
+                    "unsupported_input",
+                    "agent modes require PE, ELF, or Mach-O input",
+                ));
             }
-            let allowed: &[&str] = match mode {
-                "--agent-brief" => &["--agent-brief", "--limit", "--json"],
-                "--index" => &["--index", "--limit", "--json"],
-                "--verify-index" => &["--verify-index", "--json"],
-                "--card" => &[
-                    "--card",
-                    "--analysis-cache",
-                    "--max-decode-instructions",
-                    "--max-ssa-work",
-                    "--deadline-ms",
-                    "--json",
-                    "--pcode",
-                    "--decompile",
-                    "--instruction-cursor",
-                    "--operation-cursor",
-                ],
-                _ => &[
-                    "--ssa-slice",
-                    "--var",
-                    "--call-site",
-                    "--arg",
-                    "--return",
-                    "--at",
-                    "--condition",
-                    "--analysis-cache",
-                    "--max-decode-instructions",
-                    "--max-ssa-work",
-                    "--deadline-ms",
-                    "--max-nodes",
-                    "--max-depth",
-                    "--max-call-depth",
-                    "--max-functions",
-                    "--max-traversal-work",
-                    "--json",
-                ],
+            contracts::validate(op, &args, if target_free { 1 } else { 2 })?;
+            let data = if target_free {
+                None
+            } else {
+                Some(std::fs::read(&args[1]).map_err(|e| {
+                    AgentError::new("input_unreadable", format!("cannot read binary: {e}"))
+                })?)
             };
-            let takes_value = [
-                "--index",
-                "--verify-index",
-                "--limit",
-                "--instruction-cursor",
-                "--operation-cursor",
-                "--ssa-slice",
-                "--var",
-                "--call-site",
-                "--arg",
-                "--at",
-                "--condition",
-                "--analysis-cache",
-                "--max-decode-instructions",
-                "--max-ssa-work",
-                "--deadline-ms",
-                "--max-nodes",
-                "--max-depth",
-                "--max-call-depth",
-                "--max-functions",
-                "--max-traversal-work",
-            ];
-            let mut i = 2;
-            while i < args.len() {
-                let arg = args[i].as_str();
-                if arg.starts_with("--") {
-                    if !allowed.contains(&arg) {
-                        return Err(format!("unsupported {mode} option: {arg}"));
-                    }
-                    if takes_value.contains(&arg) {
-                        value_arg(&args, arg)?;
-                        i += 1;
-                    }
-                } else if mode != "--card" {
-                    return Err(format!("unexpected argument: {arg}"));
-                }
-                i += 1;
+            let capture = op.flag("--evidence").is_some()
+                && args
+                    .iter()
+                    .any(|a| a == "--evidence" || a == "--evidence-store");
+            if !capture {
+                return run_operation(op, &args, data.as_deref());
             }
-            for flag in [
-                "--limit",
-                "--instruction-cursor",
-                "--operation-cursor",
-                "--max-nodes",
-                "--max-depth",
-                "--max-call-depth",
-                "--max-functions",
-                "--max-traversal-work",
-            ] {
-                if value_arg(&args, flag)?.is_some() {
-                    number_arg(&args, flag, 0)?;
-                }
-            }
-            if value_arg(&args, "--limit")?.is_some() && number_arg(&args, "--limit", 1)? == 0 {
-                return Err("--limit must be positive".to_string());
-            }
-            let path = &args[1];
-            let data = std::fs::read(path).map_err(|e| format!("cannot read binary: {e}"))?;
-            match mode {
-                "--agent-brief" => run_agent_brief(path, &data, &args),
-                "--index" => {
-                    index::build(path, &data, &args, value_arg(&args, "--index")?.unwrap())
-                }
-                "--verify-index" => {
-                    index::verify(&data, value_arg(&args, "--verify-index")?.unwrap())
-                }
-                "--card" => card::run(path, &data, &args),
-                _ => slice::run(&data, &args),
-            }
+            let data = data.expect("evidence operations read a binary");
+            evidence::preflight(&args, &data)?;
+            evidence::begin_capture();
+            let result = run_operation(op, &args, Some(&data));
+            let captured = evidence::end_capture();
+            let code = result?;
+            evidence::finish(op, &args, &data, captured, code)?;
+            Ok(code)
         });
     let result = result
-        .map_err(|e| format!("cannot start analysis worker: {e}"))
-        .and_then(|t| t.join().map_err(|_| "analysis worker panicked".to_string()))
+        .map_err(|e| {
+            AgentError::new(
+                "analysis_failed",
+                format!("cannot start analysis worker: {e}"),
+            )
+        })
+        .and_then(|t| {
+            t.join()
+                .map_err(|_| AgentError::new("analysis_failed", "analysis worker panicked"))
+        })
         .and_then(|r| r);
     let code = match result {
         Ok(code) => code,
         Err(error) => {
-            emit(&json!({"schema":schema, "status":"failed", "error":error,
-                "diagnostics":[diagnostic("command", "command_failed", &error)]}));
+            emit(
+                &json!({"schema":schema, "status":"failed", "error":error.message,
+                "error_code":error.code,
+                "diagnostics":[diagnostic("command", "command_failed", &error.message)]}),
+            );
             eprintln!("Error: {error}");
             1
         }

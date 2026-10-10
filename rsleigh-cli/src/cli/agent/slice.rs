@@ -1,5 +1,4 @@
 use super::*;
-use rsleigh_api::Architecture;
 use rsleigh_decompile::slice::selector::{self, Selector};
 
 fn address(value: &str) -> Result<u64, String> {
@@ -10,7 +9,11 @@ fn address(value: &str) -> Result<u64, String> {
     u64::from_str_radix(value, 16).map_err(|_| "invalid selector instruction address".into())
 }
 
-fn parse_selector(args: &[String]) -> Result<Selector, String> {
+fn parse_selector(args: &[String]) -> Result<Selector, AgentError> {
+    selector_from_args(args).map_err(|e| AgentError::new("invalid_selector", e))
+}
+
+fn selector_from_args(args: &[String]) -> Result<Selector, String> {
     let var = value_arg(args, "--var")?;
     let call = value_arg(args, "--call-site")?;
     let argument = value_arg(args, "--arg")?;
@@ -56,15 +59,13 @@ fn parse_selector(args: &[String]) -> Result<Selector, String> {
     }
 }
 
-pub(super) fn run(data: &[u8], args: &[String]) -> Result<u8, String> {
+pub(super) fn run(data: &[u8], args: &[String]) -> Result<u8, AgentError> {
     let _execution = execution_scope(args)?;
     let target = value_arg(args, "--ssa-slice")?.ok_or("--ssa-slice requires a function")?;
     let selector = parse_selector(args)?;
     let max_nodes = number_arg(args, "--max-nodes", 64)?;
     let max_depth = number_arg(args, "--max-depth", 16)?;
-    let obj = parse_object_lenient(data).map_err(|e| e.to_string())?;
-    let (arch, _segs, symbols) =
-        agent_symbols(&obj, data).ok_or("unsupported binary format or architecture")?;
+    let (obj, arch, _segs, symbols) = parse_native(data)?;
     let address = card::resolve_target(target, &symbols)?;
     let (snapshot, mut metrics) = cache::analyze(data, address, arch, args)?;
     let snapshot = match snapshot {
@@ -100,7 +101,7 @@ pub(super) fn run(data: &[u8], args: &[String]) -> Result<u8, String> {
         .collect();
     let cc = rsleigh_decompile::detect_cc(arch, Some(data));
     let selection = if matches!(selector, Selector::CallArgument { .. })
-        && matches!(arch, Architecture::MIPS32 | Architecture::RiscV64)
+        && !capabilities::supports_call_arguments(arch)
     {
         Err(selector::SelectionError {code:"unsupported_root", message:"integer argument selectors are not yet supported for this architecture's calling convention".into(), candidates:vec![]})
     } else {
@@ -138,7 +139,7 @@ pub(super) fn run(data: &[u8], args: &[String]) -> Result<u8, String> {
         &imports,
         limits,
         |target| {
-            if matches!(arch, Architecture::MIPS32 | Architecture::RiscV64) {
+            if !capabilities::supports_call_arguments(arch) {
                 return Err("unsupported_calling_convention: helper-call traversal is not yet supported for this architecture".into());
             }
             if let Some(snapshot) = snapshots.get(&target) {

@@ -81,6 +81,49 @@ produce identical output for that compiled fixture. Running the remainder
 with `-- --skip tests::decompiler_validation` passes 20 tests. This known
 failure remains open; it is not counted as a passing full-suite gate.
 
+## Workflow tasks
+
+`agent_re_eval --workflows` adds seven end-to-end tasks for the capability
+catalog, portable evidence, investigations, and function comparison. They run
+on seed.rs and its [variants](../test-harness/fixtures/agent-re/variants.rs)
+plus the six-architecture corpus; the 18 tasks above remain regression coverage.
+
+| Task | Question |
+|---|---|
+| capability-guided-selection | Which selector answers the MIPS32 return question, given catalog support? |
+| portable-handoff | Does exported evidence verify, move, import, and keep IDs and links (cold and warm)? |
+| unresolved-question-retention | Does an unresolved indirect call stay pending after handoff without the binary? |
+| contradiction-preservation | Are supporting and contradicting records retained through export/import? |
+| corrupt-stale-evidence | Are corrupt bundles, stale revisions, and unavailable evidence rejected? |
+| relocated-function-comparison | Is a relocated identical function explained rather than changed? |
+| intentional-version-divergence | Are deliberate changes found without upgrading unknown evidence? |
+
+Each result records answer and evidence correctness, commands, returned bytes,
+elapsed time, cache work, and artifact size. The runner requires zero lost
+references and zero incorrect upgrades from partial/unknown evidence to
+complete, answered, unchanged, or absent. The expected answer of the
+unresolved-question task is "unknown"; it passes when the boundary remains open.
+
+Local result on macOS arm64 at `16d3d0c` plus this change (uncommitted working
+tree), release build:
+
+| Task | Answer | Evidence | Commands | Stdout bytes | Bundle bytes |
+|---|---|---|---:|---:|---:|
+| capability-guided-selection | pass | pass | 3 | 48,392 | — |
+| portable-handoff | pass | pass | 8 | 38,545 | 28,885 |
+| unresolved-question-retention | pass | pass | 9 | 36,952 | 21,080 |
+| contradiction-preservation | pass | pass | 10 | 39,767 | 35,973 |
+| corrupt-stale-evidence | pass | pass | 9 | 25,289 | 2,824 |
+| relocated-function-comparison | pass | pass | 1 | 11,358 | — |
+| intentional-version-divergence | pass | pass | 4 | 38,212 | — |
+
+Totals: 7/7 answers, 7/7 evidence, 0 lost references, 0 incorrect upgrades.
+Resuming the unresolved-question investigation without the binary took 2
+commands and 8,234 bytes; re-running the brief and slice on the same input took
+2 commands and 8,651 bytes without restoring the recorded question, evidence
+links, or next queries. Timings are single-run measurements and are not claimed
+as an improvement.
+
 ## Cached card measurements
 
 The original [cache workload](../test-harness/fixtures/agent-re/cache_workload.rs)

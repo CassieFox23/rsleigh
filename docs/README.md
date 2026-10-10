@@ -25,7 +25,10 @@ links for details instead of loading all documentation into every model turn.
 | How should an agent investigate a binary? | [Agent workflow](agent-workflow.md) |
 | Where does a call argument, return value, or condition come from? | [Semantic dependency selectors](agent-workflow.md#bounded-backward-ssa-query) |
 | How do I reuse analysis and bound execution work? | [Analysis cache](agent-workflow.md#reuse-analysis) · [Work limits](agent-workflow.md#limit-execution-work) |
+| Which operations, flags, and per-architecture queries does this build support? | `rsleigh --capabilities --json` · [Discovery](cli-reference.md#discover-supported-operations) |
 | Which command and flags answer this question? | [CLI command guide](cli-reference.md) |
+| How do I hand off evidence and open questions to another session? | [Portable evidence](agent-workflow.md#portable-evidence) · [Investigations](agent-workflow.md#track-questions-across-sessions) |
+| What changed between two builds of a function? | [Function comparison](cli-reference.md#compare-two-builds) |
 | Is this output JSON, NDJSON, or text? How do I detect failure? | [Output formats](output-formats.md) |
 | Why is output empty, incomplete, or unexpected? | [Troubleshooting](troubleshooting.md) |
 | Does my architecture support this analysis stage? | [Architecture matrix](architectures.md) |
@@ -54,9 +57,9 @@ A capped map is a starting point, not an exhaustive result. A solver's
 
 The guides linked above describe the current source checkout. Record the
 installed package version or source revision with an analysis; a release or
-Context7 index can lag `master`. The CLI currently prints usage when invoked
-without arguments and does not implement conventional `--help` / `--version`
-flags. See [CLI conventions](cli-reference.md#invocation-conventions).
+Context7 index can lag `master`. `rsleigh --version` prints the package version
+and `--version --json` adds the linked build identity; `--help` prints usage.
+See [CLI conventions](cli-reference.md#invocation-conventions).
 
 [The engineering audit](audit-gpt-5.5.md) and the design specifications and
 plans under `superpowers/` are historical development material. They can explain

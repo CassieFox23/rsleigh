@@ -4,6 +4,39 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `rsleigh --capabilities [--json]`: a target-free `rsleigh.capabilities/v1`
+  catalog of agent operations (schemas, typed flags with evidence roles,
+  effects, limits, runnable examples), input frontends, per-architecture stage
+  quality and dependency-query support, and stable error codes. Dispatch
+  validation and `--help` usage are generated from the same typed contracts.
+- `--help` (stdout, exit 0) and `--version [--json]`, including the linked
+  build identity.
+- Stable `error_code` on every agent failure envelope.
+- Portable evidence: `--evidence`, `--evidence-store DIR`, and
+  `--derived-from ID` wrap brief/card/slice/comparison payloads in
+  content-addressed `rsleigh.evidence/v1` records; `--export-bundle`,
+  `--verify-bundle` (offline, optional source binding), and `--import-bundle`
+  move them between sessions as `rsleigh.evidence-bundle/v1` generations.
+- Investigations: `--investigate DIR --question TEXT` and
+  `--investigation DIR` with revision-checked updates, deduplicated slice
+  boundary issues, supporting/contradicting evidence, evidence-checked answers
+  distinct from withdrawals, platform-aware next queries, and Markdown handoff.
+- `--compare NEW` (`rsleigh.function-comparison/v1`): per-dimension
+  bytes/instructions/calls/strings/CFG/pseudocode comparison with explicit
+  `unknown`, ambiguous, unmatched, and suggested-but-unestablished pairs.
+- `agent_re_eval --workflows`: seven end-to-end workflow tasks in CI.
+
+### Changed
+
+- Bare invocation usage is generated from the operation catalog; a first
+  argument beginning with `-` is now an option (write such files as `./NAME`).
+- `--diff` renders the structured comparison model. Duplicate names are
+  reported as ambiguous instead of overwriting each other, unreadable inputs
+  fail instead of comparing against an empty set, and functions missing from a
+  partial inventory are no longer reported as removed.
+
 ## [0.5.0] - 2026-09-07
 
 ### Added

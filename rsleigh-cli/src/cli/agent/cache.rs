@@ -9,7 +9,7 @@ const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Linker-assigned IDs identify the actual linked build without hashing the
 /// executable on every query. Unsupported/ID-less images use a full SHA-256.
-fn tool_build_id(executable: &Path) -> Result<Value, String> {
+pub(super) fn tool_build_id(executable: &Path) -> Result<Value, String> {
     let file = std::fs::File::open(executable).map_err(|e| e.to_string())?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let mut prefix = Vec::new();

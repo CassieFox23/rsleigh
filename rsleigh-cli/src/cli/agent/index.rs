@@ -14,7 +14,7 @@ pub(super) fn build(
     data: &[u8],
     args: &[String],
     out_dir: &str,
-) -> Result<u8, String> {
+) -> Result<u8, AgentError> {
     let limit = requested_agent_limit(args, AGENT_INDEX_MAX_FUNCTIONS, AGENT_INDEX_MAX_FUNCTIONS);
     let analysis = build_agent_analysis(binary_path, data, limit, AGENT_INDEX_MAX_FINDINGS)?;
     let status = analysis_status(&analysis);
@@ -72,7 +72,7 @@ pub(super) fn build(
             "findings_total":analysis.total_findings,"findings_cap":AGENT_INDEX_MAX_FINDINGS}
     });
     let manifest = publish(Path::new(out_dir), manifest, &artifacts)
-        .map_err(|e| format!("cannot publish index: {e}"))?;
+        .map_err(|e| AgentError::new("write_failed", format!("cannot publish index: {e}")))?;
     emit(&manifest);
     Ok(status_exit(status))
 }
@@ -147,21 +147,29 @@ fn sync_directory(_: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub(super) fn verify(data: &[u8], out_dir: &str) -> Result<u8, String> {
-    let root = Path::new(out_dir);
+pub(super) fn verify(data: &[u8], out_dir: &str) -> Result<u8, AgentError> {
+    verify_files(data, out_dir).map_err(|e| AgentError::new("verification_failed", e))
+}
+
+/// Read the published root manifest. Callers check its schema and identity
+/// before trusting any artifact named by it.
+pub(super) fn read_manifest(root: &Path) -> Result<(Vec<u8>, Value), String> {
+    let path = root.join("index.json");
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let manifest =
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid index manifest: {e}"))?;
+    Ok((bytes, manifest))
+}
+
+/// Verify a completed generation and return every listed artifact. The root
+/// manifest must equal the generation's copy; each artifact must be named
+/// once, live at its generation path, and match its recorded size/checksum.
+pub(super) fn read_artifacts(
+    root: &Path,
+    manifest_bytes: &[u8],
+    manifest: &Value,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let read = |p: &Path| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
-    let manifest_bytes = read(&root.join("index.json"))?;
-    let manifest: Value = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| format!("invalid index manifest: {e}"))?;
-    if manifest["schema"] != "rsleigh.index/v2" {
-        return Err("expected rsleigh.index/v2".into());
-    }
-    if manifest["file"]["hashes"]["sha256"] != compute_sha256(data) {
-        return Err("index binary SHA-256 does not match input".into());
-    }
-    if manifest["tool_version"] != env!("CARGO_PKG_VERSION") {
-        return Err("index tool version differs; rebuild before reuse".into());
-    }
     let generation = manifest["generation"]
         .as_str()
         .ok_or("missing generation")?;
@@ -175,15 +183,22 @@ pub(super) fn verify(data: &[u8], out_dir: &str) -> Result<u8, String> {
     let files = manifest["files"]
         .as_array()
         .ok_or("missing artifact manifest")?;
-    if files.len() != ARTIFACTS.len() {
-        return Err("incomplete artifact manifest".into());
-    }
-    for name in ARTIFACTS {
-        let matches: Vec<_> = files.iter().filter(|f| f["name"] == name).collect();
-        if matches.len() != 1 {
+    let mut seen = std::collections::HashSet::new();
+    let mut artifacts = Vec::new();
+    for record in files {
+        let name = record["name"].as_str().ok_or("artifact without a name")?;
+        if name.is_empty()
+            || name == "index.json"
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+            || name.starts_with('.')
+        {
+            return Err(format!("invalid artifact name: {name}"));
+        }
+        if !seen.insert(name) {
             return Err(format!("missing or duplicate artifact: {name}"));
         }
-        let record = matches[0];
         let expected_path = format!("generations/{generation}/{name}");
         if record["path"] != expected_path {
             return Err(format!("invalid artifact path for {name}"));
@@ -194,6 +209,33 @@ pub(super) fn verify(data: &[u8], out_dir: &str) -> Result<u8, String> {
         {
             return Err(format!("artifact checksum or size mismatch: {name}"));
         }
+        artifacts.push((name.to_string(), bytes));
+    }
+    Ok(artifacts)
+}
+
+fn verify_files(data: &[u8], out_dir: &str) -> Result<u8, String> {
+    let root = Path::new(out_dir);
+    let (manifest_bytes, manifest) = read_manifest(root)?;
+    if manifest["schema"] != "rsleigh.index/v2" {
+        return Err("expected rsleigh.index/v2".into());
+    }
+    if manifest["file"]["hashes"]["sha256"] != compute_sha256(data) {
+        return Err("index binary SHA-256 does not match input".into());
+    }
+    if manifest["tool_version"] != env!("CARGO_PKG_VERSION") {
+        return Err("index tool version differs; rebuild before reuse".into());
+    }
+    let artifacts = read_artifacts(root, &manifest_bytes, &manifest)?;
+    if artifacts.len() != ARTIFACTS.len() {
+        return Err("incomplete artifact manifest".into());
+    }
+    for name in ARTIFACTS {
+        let bytes = &artifacts
+            .iter()
+            .find(|(n, _)| n == name)
+            .ok_or_else(|| format!("missing or duplicate artifact: {name}"))?
+            .1;
         if name == "findings.ndjson" {
             for line in bytes.split(|b| *b == b'\n').filter(|b| !b.is_empty()) {
                 let f: Value =
@@ -204,13 +246,15 @@ pub(super) fn verify(data: &[u8], out_dir: &str) -> Result<u8, String> {
             }
         } else {
             let value: Value =
-                serde_json::from_slice(&bytes).map_err(|e| format!("invalid {name}: {e}"))?;
+                serde_json::from_slice(bytes).map_err(|e| format!("invalid {name}: {e}"))?;
             let kind = name.trim_end_matches(".json");
             if value["schema"] != format!("rsleigh.{kind}/v1") {
                 return Err(format!("invalid schema: {name}"));
             }
         }
     }
+    let generation = manifest["generation"].as_str().unwrap_or_default();
+    let files = &artifacts;
     let status = manifest["status"]
         .as_str()
         .ok_or("missing analysis status")?;
