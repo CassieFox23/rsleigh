@@ -56,21 +56,31 @@ fn assert_reachable_or_skip_no_smt(stdout: &str, label: &str) {
 
 #[test]
 fn recv_strcpy_stack_buffer_reachable() {
-    let Some(bin) = fixture("recv_strcpy") else { return };
+    let Some(bin) = fixture("recv_strcpy") else {
+        return;
+    };
     let out = run_explore(&bin, "vuln_recv_strcpy");
     assert!(
         out.contains("recv -> strcpy"),
         "missing recv->strcpy path label:\n{out}"
     );
-    assert!(out.contains("StackBuffer"), "missing StackBuffer kind:\n{out}");
+    assert!(
+        out.contains("StackBuffer"),
+        "missing StackBuffer kind:\n{out}"
+    );
     assert_reachable_or_skip_no_smt(&out, "recv_strcpy");
 }
 
 #[test]
 fn read_system_command_injection_reachable() {
-    let Some(bin) = fixture("read_system") else { return };
+    let Some(bin) = fixture("read_system") else {
+        return;
+    };
     let out = run_explore(&bin, "vuln_read_system");
-    assert!(out.contains("read -> system"), "missing read->system path:\n{out}");
+    assert!(
+        out.contains("read -> system"),
+        "missing read->system path:\n{out}"
+    );
     assert!(out.contains("Command"), "missing Command kind:\n{out}");
     assert_reachable_or_skip_no_smt(&out, "read_system");
 }
@@ -86,9 +96,14 @@ fn heartbleed_shape_lengtharg_reachable() {
     // region is the SOURCE's specific region (not generic Param/
     // StackFrame), which preserves the FP guard while admitting the
     // Heartbleed-shape true positive.
-    let Some(bin) = fixture("heartbleed_shape") else { return };
+    let Some(bin) = fixture("heartbleed_shape") else {
+        return;
+    };
     let out = run_explore(&bin, "vuln_heartbleed");
-    assert!(out.contains("recv -> memcpy"), "missing recv->memcpy path:\n{out}");
+    assert!(
+        out.contains("recv -> memcpy"),
+        "missing recv->memcpy path:\n{out}"
+    );
     assert!(out.contains("LengthArg"), "missing LengthArg kind:\n{out}");
     assert_reachable_or_skip_no_smt(&out, "heartbleed_shape");
 }
@@ -99,7 +114,9 @@ fn inter_proc_heartbleed_lengtharg_reachable() {
     // does memcpy with tainted length extracted from buf contents.
     // Neither function alone has both source + sink. Tests inter-proc
     // taint propagation via callee summary lift.
-    let Some(bin) = fixture("inter_proc_heartbleed") else { return };
+    let Some(bin) = fixture("inter_proc_heartbleed") else {
+        return;
+    };
 
     let out = Command::new(RSLEIGH_BIN)
         .args([&bin, "--smt-explore", "handler", "--smt-summaries"])
@@ -110,11 +127,18 @@ fn inter_proc_heartbleed_lengtharg_reachable() {
         eprintln!("[skip-no-smt] inter_proc_heartbleed");
         return;
     }
-    assert!(stdout.contains("recv -> memcpy"),
-        "missing recv->memcpy path:\n{stdout}");
-    assert!(stdout.contains("LengthArg"), "missing LengthArg kind:\n{stdout}");
-    assert!(stdout.contains("REACHABLE"),
-        "inter-proc Heartbleed should be REACHABLE via summary lift:\n{stdout}");
+    assert!(
+        stdout.contains("recv -> memcpy"),
+        "missing recv->memcpy path:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("LengthArg"),
+        "missing LengthArg kind:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("REACHABLE"),
+        "inter-proc Heartbleed should be REACHABLE via summary lift:\n{stdout}"
+    );
 }
 
 #[test]
@@ -127,7 +151,9 @@ fn tainted_store_loop_reachable_via_summary() {
     // Caller (vuln_loop_store) does recv into local buf, calls
     // copy_until_zero(buf, dst). Callee body: *out++ = byte. v10
     // produces REACHABLE w/ trigger of 32 nonzero bytes.
-    let Some(bin) = fixture("tainted_store_loop") else { return };
+    let Some(bin) = fixture("tainted_store_loop") else {
+        return;
+    };
 
     let out = Command::new(RSLEIGH_BIN)
         .args([&bin, "--smt-explore", "vuln_loop_store", "--smt-summaries"])
@@ -158,7 +184,9 @@ fn bounded_loop_not_reachable_v11a() {
     // `for (i=0; i<16; i++)` not `while (*src)`, so the function
     // has no `Load(_) == 0` CBranch. detect_tainted_store rejects
     // → no path → NoSinkFound.
-    let Some(bin) = fixture("bounded_loop") else { return };
+    let Some(bin) = fixture("bounded_loop") else {
+        return;
+    };
     let out = Command::new(RSLEIGH_BIN)
         .args([&bin, "--smt-explore", "safe_handler", "--smt-summaries"])
         .output()
@@ -176,9 +204,14 @@ fn bounded_loop_not_reachable_v11a() {
 
 #[test]
 fn fgets_printf_format_string_reachable() {
-    let Some(bin) = fixture("fgets_printf") else { return };
+    let Some(bin) = fixture("fgets_printf") else {
+        return;
+    };
     let out = run_explore(&bin, "vuln_fgets_printf");
-    assert!(out.contains("fgets -> printf"), "missing fgets->printf path:\n{out}");
+    assert!(
+        out.contains("fgets -> printf"),
+        "missing fgets->printf path:\n{out}"
+    );
     assert!(out.contains("FormatArg"), "missing FormatArg kind:\n{out}");
     assert_reachable_or_skip_no_smt(&out, "fgets_printf");
 }
@@ -189,7 +222,9 @@ fn v10_inter_procedural_reachable_via_summaries() {
     //                copy_into(buf, dst)::strcpy
     // v1 (no --smt-summaries): NoSinkFound at outer.
     // v2 (--smt-summaries):    REACHABLE with non-empty call_chain.
-    let Some(bin) = fixture("wrapped_recv_strcpy") else { return };
+    let Some(bin) = fixture("wrapped_recv_strcpy") else {
+        return;
+    };
 
     let v1 = Command::new(RSLEIGH_BIN)
         .args([&bin, "--smt-explore", "outer"])

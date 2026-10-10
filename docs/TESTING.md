@@ -103,7 +103,17 @@ cargo run --release -p rsleigh-cli --example agent_re_eval -- \
   target/release/rsleigh agent-re-results.json --full-corpus
 cargo run --release -p rsleigh-cli --example agent_re_eval -- \
   target/release/rsleigh agent-re-cache-results.json --cache-benchmark
+cargo run --release -p rsleigh-cli --example agent_re_eval -- \
+  target/release/rsleigh agent-re-workflow-results.json --workflows
 ```
+
+`--workflows` runs seven end-to-end tasks over the capability catalog,
+evidence bundles, investigations, and function comparison (see
+[workflow tasks](agent-re-evaluation.md#workflow-tasks)). It fails on any
+incorrect answer or evidence, any lost reference, or any upgrade of
+partial/unknown evidence to complete, answered, unchanged, or absent.
+`rsleigh-cli/tests/agent_{contracts,evidence,investigation,compare}.rs` cover
+the same contracts as integration tests.
 
 See the [task catalog](../test-harness/fixtures/agent-re/corpus.md),
 [measurement report](agent-re-evaluation.md), and

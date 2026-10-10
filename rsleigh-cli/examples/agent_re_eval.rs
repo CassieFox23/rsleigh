@@ -11,6 +11,10 @@ mod corpus;
 mod full_corpus;
 #[path = "../../test-harness/fixtures/agent-re/traversal.rs"]
 mod traversal;
+#[path = "../../test-harness/fixtures/agent-re/variants.rs"]
+mod variants;
+#[path = "agent_re_eval/workflows.rs"]
+mod workflows;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -158,7 +162,7 @@ fn main() {
     let args: Vec<_> = std::env::args().collect();
     assert!(
         args.len() >= 3,
-        "usage: agent_re_eval CLI OUTPUT.json [--full-corpus|--cache-benchmark] [--baseline] [--write-fixtures DIR]"
+        "usage: agent_re_eval CLI OUTPUT.json [--full-corpus|--cache-benchmark|--workflows] [--baseline] [--write-fixtures DIR]"
     );
     let tool = std::fs::canonicalize(&args[1]).expect("CLI path");
     let baseline = args.iter().any(|a| a == "--baseline");
@@ -175,6 +179,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "--cache-benchmark") {
         cache_benchmark(&tool, Path::new(&args[2]), baseline);
+        return;
+    }
+    if args.iter().any(|a| a == "--workflows") {
+        workflows::run(&tool, Path::new(&args[2]));
         return;
     }
     let nonce = SystemTime::now()

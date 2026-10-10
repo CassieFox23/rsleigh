@@ -70,6 +70,9 @@ jobs:
       - name: Test — cached card equivalence and recomputation counters
         run: cargo run --release -p rsleigh-cli --example agent_re_eval -- target/release/rsleigh agent-re-cache-results.json --cache-benchmark
 
+      - name: Test — capability, evidence handoff, investigation, and comparison workflows
+        run: cargo run --release -p rsleigh-cli --example agent_re_eval -- target/release/rsleigh agent-re-workflow-results.json --workflows
+
   seh-smc-windows:
     runs-on: windows-latest
     timeout-minutes: 5

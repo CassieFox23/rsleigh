@@ -31,6 +31,9 @@ instructions.
 
 ## Budget
 
+- Check what this build supports with `rsleigh --capabilities --json`
+  (target-free). It lists each operation's flags, limits, and examples, and
+  per-architecture support; an unsupported selector fails explicitly.
 - For parsed PE/ELF/Mach-O, start with `rsleigh FILE --agent-brief --limit 5`.
   Its JSON output is capped. Raw firmware and WASM use separate frontends.
 - Use one primary mode per command and a verified address for function scope.
@@ -71,6 +74,13 @@ instructions.
   traversal work. Inspect stop records and cache/work metrics.
 - Before SMT, verify the function in the map. An unresolved name can cause a
   whole-binary scan; `--smt-candidates-top` limits output after analysis.
+- For multi-turn work, open `rsleigh FILE --investigate inv/ --question TEXT`,
+  record cards/slices with `--evidence-store inv/`, track slice boundaries with
+  `--investigation inv/ --expect-revision N --add-unknowns ID`, and hand off with
+  `--export-bundle`. Only `answered` with checked evidence is an answer;
+  withdrawn questions and unresolved boundaries stay visible.
+- Compare builds with `OLD --compare NEW --json`. `unknown` dimensions are not
+  `unchanged`; unmatched names are `absent` only against a complete inventory.
 
 ## Evidence ladder
 

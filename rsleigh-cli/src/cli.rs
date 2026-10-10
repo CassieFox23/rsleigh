@@ -27,9 +27,10 @@ pub(crate) fn parse_object_lenient(data: &[u8]) -> goblin::error::Result<goblin:
         Ok(o) => Ok(o),
         Err(e) => {
             // Retry as PE with cert-table parsing disabled.
-            if matches!(goblin::peek(&mut std::io::Cursor::new(data)),
-                        Ok(goblin::Hint::PE))
-            {
+            if matches!(
+                goblin::peek(&mut std::io::Cursor::new(data)),
+                Ok(goblin::Hint::PE)
+            ) {
                 let opts = goblin::pe::options::ParseOptions {
                     resolve_rva: true,
                     parse_attribute_certificates: false,
@@ -132,55 +133,7 @@ fn parse_swift_id(s: &str) -> Option<(&str, &str)> {
 pub fn entrypoint() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("rsleigh — pure Rust decompiler");
-        eprintln!("Usage:");
-        eprintln!("  rsleigh <binary>                  List functions");
-        eprintln!("  rsleigh <binary> <func> [func2..] Decompile functions");
-        eprintln!("  rsleigh <binary> --all             Decompile all functions");
-        eprintln!("  rsleigh <binary> --json             List functions as JSON");
-        eprintln!("  rsleigh <binary> <func> --json     Decompile as JSON");
-        eprintln!("  rsleigh <binary> --disasm <func>   Disassemble with P-code");
-        eprintln!("  rsleigh <binary> --sigs <file.json> Load extra signatures");
-        eprintln!("  rsleigh <binary> --yara             Generate YARA detection rule");
-        eprintln!("  rsleigh <binary> --imphash          Compute imphash (Mandiant) for PE");
-        eprintln!("  rsleigh <binary> --hashes           Print sha256, md5, imphash, size");
-        eprintln!("  rsleigh old.bin --diff new.bin      Diff decompilation (show changes)");
-        eprintln!(
-            "  rsleigh <binary> --taint            Taint analysis (trace user input to sinks)"
-        );
-        eprintln!("  rsleigh <binary> --summary          AI summary (one-line per function)");
-        eprintln!("  rsleigh <binary> --agent-brief      Bounded JSON map for coding agents");
-        eprintln!("  rsleigh <binary> --index <dir>      Write a reusable analysis index");
-        eprintln!("  rsleigh <binary> <func> --card [--json] [--pcode] [--decompile]");
-        eprintln!("             [--instruction-cursor N] [--operation-cursor N]  Paginated evidence");
-        eprintln!("  rsleigh <binary> --verify-index <dir>  Verify binary identity and artifact checksums");
-        eprintln!("  rsleigh <binary> --ssa-slice <func> --var ID [--max-nodes N] [--max-depth N]");
-        eprintln!("    [--max-call-depth N] [--max-functions N] [--max-traversal-work N]");
-        eprintln!("             Roots: --call-site 0xADDR --arg N | --return [--at 0xADDR] | --condition 0xADDR");
-        eprintln!("  Card/slice analysis: [--analysis-cache DIR] [--max-decode-instructions N] [--max-ssa-work N] [--deadline-ms N]");
-        eprintln!("  Agent exits: 0 complete, 2 partial evidence, 1 failed");
-        eprintln!("  rsleigh <binary> --xrefs <func>     Cross-references (callers + callees)");
-        eprintln!("  rsleigh <binary> --search <query>   Find functions by string/pattern");
-        eprintln!("  rsleigh <binary> --search --api <name>  Find functions calling API");
-        eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
-        eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
-        eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
-        eprintln!("  rsleigh <binary> --smt-explore <func> [--smt-summaries] [--json]  SMT taint-flow CVE proof (requires --features smt; --smt-summaries enables inter-procedural V2)");
-        eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
-        eprintln!("  rsleigh <binary> <finding mode> --findings-ndjson  Emit shared finding records");
-        eprintln!("  rsleigh <binary> --xor-strings [--json]  Brute single-byte XOR string recovery");
-        eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
-        eprintln!("  rsleigh <binary> --resources [--dump DIR] [--json]  Walk PE resource directory; --dump extracts blobs");
-        eprintln!(
-            "  rsleigh <binary> --all --compact     Token-efficient output (no decls/blanks)"
-        );
-        eprintln!("  rsleigh <binary> --all --brief       Calls + strings only (minimal tokens)");
-        eprintln!("  rsleigh <binary> --all --min-complexity 10  Skip trivial functions");
-        eprintln!("  rsleigh <binary> --callgraph         Export call graph as JSON");
-        eprintln!("  rsleigh <binary> --classes           Recover C++ classes from RTTI");
-        eprintln!(
-            "  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)"
-        );
+        eprint!("{}", agent::usage());
         std::process::exit(1);
     }
 
@@ -341,7 +294,10 @@ pub fn entrypoint() {
                             "tag-dispatch",
                             rsleigh_decompile::finding::FindingConfidence::Pattern,
                             rsleigh_decompile::finding::FindingStage::Discover,
-                            format!("tag 0x{:02x} dispatches to 0x{:x}", case.tag, case.target_va),
+                            format!(
+                                "tag 0x{:02x} dispatches to 0x{:x}",
+                                case.tag, case.target_va
+                            ),
                         )
                         .with_evidence(serde_json::json!({
                             "binary": binary_path,
@@ -403,7 +359,10 @@ pub fn entrypoint() {
                             "vm-dispatch",
                             rsleigh_decompile::finding::FindingConfidence::Heuristic,
                             rsleigh_decompile::finding::FindingStage::Discover,
-                            format!("VM dispatcher references {} data slot(s)", info.data_slots.len()),
+                            format!(
+                                "VM dispatcher references {} data slot(s)",
+                                info.data_slots.len()
+                            ),
                         )
                         .with_evidence(serde_json::json!({
                             "binary": binary_path,
@@ -701,7 +660,16 @@ pub fn entrypoint() {
     }
 
     // Summary/Xrefs/Search/Vulnscan/Callgraph modes
-    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || xor_strings_mode || sigcheck_mode || resources_mode {
+    if summary_mode
+        || xrefs_mode
+        || search_mode
+        || vulnscan_mode
+        || callgraph_mode
+        || ioc_mode
+        || xor_strings_mode
+        || sigcheck_mode
+        || resources_mode
+    {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -773,14 +741,7 @@ pub fn entrypoint() {
                         return;
                     }
                     if let Some((arch, base)) = parse_raw_arch_base(&args_clone) {
-                        run_search_raw(
-                            &data,
-                            arch,
-                            base,
-                            &query,
-                            const_mode,
-                            json_output,
-                        );
+                        run_search_raw(&data, arch, base, &query, const_mode, json_output);
                     } else {
                         run_search(
                             &bp,
@@ -1236,8 +1197,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 .unwrap()
                 .standard_fields
                 .address_of_entry_point as u64;
-        let existing: std::collections::BTreeSet<u64> =
-            symbols.iter().map(|(a, _)| *a).collect();
+        let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
         for (addr, name) in discover_pe_functions(entry, &segs, &data, arch) {
             if !existing.contains(&addr) {
                 symbols.push((addr, name));
@@ -1422,7 +1382,13 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let smt_explore_all_early = args.iter().any(|a| a == "--smt-explore-all");
     let smt_diag_early = args.iter().any(|a| a == "--smt-diag");
     let smt_candidates_early = args.iter().any(|a| a == "--smt-candidates");
-    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early && !smt_diag_early && !smt_candidates_early {
+    if func_args.is_empty()
+        && !all_mode
+        && !disasm_mode
+        && !smt_explore_all_early
+        && !smt_diag_early
+        && !smt_candidates_early
+    {
         // List functions. Hide CRT-internal / runtime glue whose names start
         // with a single `_` (`_init`, `_fini`, `_start`, `_dl_*`, etc.) but
         // KEEP demangled-candidate symbols starting with `_Z` / `__Z` (C++
@@ -1683,10 +1649,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
                     u64::from_str_radix(hex, 16).ok()
                 } else {
-                    symbols
-                        .iter()
-                        .find(|(_, n)| n == *name)
-                        .map(|(a, _)| *a)
+                    symbols.iter().find(|(_, n)| n == *name).map(|(a, _)| *a)
                 }
             })
             .collect();
@@ -1700,17 +1663,35 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             .and_then(|s| s.parse().ok())
             .unwrap_or(256);
         run_smt_candidates(
-            &data, arch, &symbols, &segs, &mut dec, &scope_addrs, cap, top_n, no_dedup,
+            &data,
+            arch,
+            &symbols,
+            &segs,
+            &mut dec,
+            &scope_addrs,
+            cap,
+            top_n,
+            no_dedup,
         );
         return;
     }
     let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
-        Some(build_binary_summaries(&data, arch, &symbols, &segs, &mut dec))
+        Some(build_binary_summaries(
+            &data, arch, &symbols, &segs, &mut dec,
+        ))
     } else {
         None
     };
     if smt_explore_all {
-        run_smt_explore_all(&data, arch, &symbols, &segs, &mut dec, json_mode, inter_proc_summaries.as_ref());
+        run_smt_explore_all(
+            &data,
+            arch,
+            &symbols,
+            &segs,
+            &mut dec,
+            json_mode,
+            inter_proc_summaries.as_ref(),
+        );
         return;
     }
     if pcode_json || ssa_json || opaque_scan || smt_explore {
@@ -1726,7 +1707,14 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 continue;
             };
             let insts = if pcode_json {
-                decode_func_raw_with_diagnostics(func_addr, &symbols, &segs, &data, &mut dec, &mut Vec::new())
+                decode_func_raw_with_diagnostics(
+                    func_addr,
+                    &symbols,
+                    &segs,
+                    &data,
+                    &mut dec,
+                    &mut Vec::new(),
+                )
             } else {
                 decode_func(func_addr, &symbols, &segs, &data, &mut dec)
             };
@@ -1777,13 +1765,14 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 );
             }
             if ssa_json {
-                let (ssa_instructions, diagnostics) = match agent::ssa_instructions(&data, func_addr) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        eprintln!("Cannot build SSA snapshot: {error}");
-                        std::process::exit(1);
-                    }
-                };
+                let (ssa_instructions, diagnostics) =
+                    match agent::ssa_instructions(&data, func_addr) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            eprintln!("Cannot build SSA snapshot: {error}");
+                            std::process::exit(1);
+                        }
+                    };
                 let ssa = rsleigh_decompile::folded_ssa(arch, &ssa_instructions, Some(&data));
                 let blocks: Vec<serde_json::Value> = ssa
                     .blocks
@@ -2169,8 +2158,7 @@ fn build_binary_summaries_scoped(
     // v17: compute reachable set when scope is non-empty. Cheap
     // BL/CALL-target scan over each function's raw instruction
     // stream (no SSA build) propagated to fixpoint.
-    let symbol_addrs: std::collections::HashSet<u64> =
-        symbols.iter().map(|(a, _)| *a).collect();
+    let symbol_addrs: std::collections::HashSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
     let reachable: Option<std::collections::HashSet<u64>> = if scope_addrs.is_empty() {
         // v21: whole-binary mode — seed reachable with funcs that
         // call any libc Source or Sink directly. Walking the call
@@ -2180,8 +2168,7 @@ fn build_binary_summaries_scoped(
         // closure) get skipped, saving SSA/region inference cost
         // on hundreds of helpers per binary.
         use rsleigh_decompile::smt_explore::{DEFAULT_SINKS, DEFAULT_SOURCES};
-        let mut libc_touch: std::collections::HashSet<u64> =
-            std::collections::HashSet::new();
+        let mut libc_touch: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let libc_addrs: std::collections::HashSet<u64> = imports
             .iter()
             .filter_map(|(a, n)| {
@@ -2271,8 +2258,7 @@ fn build_binary_summaries_scoped(
             Some(set)
         }
     } else {
-        let mut set: std::collections::HashSet<u64> =
-            scope_addrs.iter().copied().collect();
+        let mut set: std::collections::HashSet<u64> = scope_addrs.iter().copied().collect();
         let mut frontier: Vec<u64> = scope_addrs.to_vec();
         const MAX_DEPTH: usize = 32;
         for _ in 0..MAX_DEPTH {
@@ -2341,13 +2327,7 @@ fn build_binary_summaries_scoped(
         std::collections::HashMap::new();
     for (fid, ssa) in &ssas {
         if let Some(arg_vars) = arg_vars_map.get(fid) {
-            contexts.insert(
-                *fid,
-                FunctionContext {
-                    ssa,
-                    arg_vars,
-                },
-            );
+            contexts.insert(*fid, FunctionContext { ssa, arg_vars });
         }
     }
     build_summaries_bottom_up(&graph, &sccs, &contexts, &imports)
@@ -2375,8 +2355,8 @@ fn run_smt_diag(
 ) {
     use rsleigh_decompile::callgraph::FuncId;
     use rsleigh_decompile::smt_explore::{
-        collect_paths, collect_paths_with_summaries_named, resolve_call, SpecRef,
-        DEFAULT_SINKS, DEFAULT_SOURCES,
+        collect_paths, collect_paths_with_summaries_named, resolve_call, SpecRef, DEFAULT_SINKS,
+        DEFAULT_SOURCES,
     };
 
     let imports = rsleigh_decompile::imports::resolve_imports(data);
@@ -2491,10 +2471,7 @@ fn run_smt_diag(
         let mut saw_source = false;
         let mut saw_sink = false;
         for block in &ssa.blocks {
-            let visit_target = |target: &rsleigh_decompile::ir::CallTarget| -> (
-                bool,
-                Option<u64>,
-            ) {
+            let visit_target = |target: &rsleigh_decompile::ir::CallTarget| -> (bool, Option<u64>) {
                 match target {
                     rsleigh_decompile::ir::CallTarget::Direct(a) => (false, Some(*a)),
                     rsleigh_decompile::ir::CallTarget::Indirect(_) => (true, None),
@@ -2553,7 +2530,9 @@ fn run_smt_diag(
                 total_paths += paths.len();
             }
         }
-        if let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name)) {
+        if let Ok(paths) =
+            collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name))
+        {
             if !paths.is_empty() {
                 funcs_with_paths_summary += 1;
                 total_paths_summary += paths.len();
@@ -2696,7 +2675,7 @@ fn run_smt_diag(
         // to see which kinds dominate. Without this we can't tell
         // whether 0 hits = no paths vs. all paths in unsupported
         // sink kinds (LengthArg) vs. legitimately Unsat.
-        use rsleigh_decompile::smt_explore::{solve_with_imports, SmtFinding, SinkKind};
+        use rsleigh_decompile::smt_explore::{solve_with_imports, SinkKind, SmtFinding};
         let mut verdict_reachable = 0usize;
         let mut verdict_not = 0usize;
         let mut verdict_unsupported = 0usize;
@@ -2713,8 +2692,11 @@ fn run_smt_diag(
             let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
             let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
             rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
-            let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name))
-            else { continue };
+            let Ok(paths) =
+                collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name))
+            else {
+                continue;
+            };
             for path in &paths {
                 let kind_name = match path.sink.kind {
                     SinkKind::StackBuffer => "StackBuffer",
@@ -2832,9 +2814,7 @@ fn run_smt_candidates(
 
     // v17: lazy summary build when scoped. Whole-binary mode
     // (scope_addrs.is_empty()) preserves legacy behaviour.
-    let summaries = build_binary_summaries_scoped(
-        data, arch, symbols, segs, dec, scope_addrs,
-    );
+    let summaries = build_binary_summaries_scoped(data, arch, symbols, segs, dec, scope_addrs);
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
     let cc = match arch {
@@ -2868,7 +2848,8 @@ fn run_smt_candidates(
         let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
         rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
 
-        let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name)) else {
+        let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name))
+        else {
             continue;
         };
         let mut per_fn_emitted = 0usize;
@@ -2878,7 +2859,10 @@ fn run_smt_candidates(
                 total_capped += skipped;
                 eprintln!(
                     "[smt-candidates] {} ({}): emitted {}, capped {} more",
-                    name, format!("0x{:x}", addr), per_fn_emitted, skipped
+                    name,
+                    format!("0x{:x}", addr),
+                    per_fn_emitted,
+                    skipped
                 );
                 break;
             }
@@ -2947,10 +2931,9 @@ fn run_smt_candidates(
                 .map(|d| format!("{:?}", d.expr))
                 .unwrap_or_default();
             let call_chain: Vec<String> = match &sink_event.kind {
-                TaintEventKind::SinkCall { call_chain, .. } => call_chain
-                    .iter()
-                    .map(|a| format!("0x{:x}", a))
-                    .collect(),
+                TaintEventKind::SinkCall { call_chain, .. } => {
+                    call_chain.iter().map(|a| format!("0x{:x}", a)).collect()
+                }
                 _ => Vec::new(),
             };
 
@@ -2993,7 +2976,12 @@ fn run_smt_candidates(
                         "addr": var_descriptor(*addr),
                         "val":  var_descriptor(*val),
                     }),
-                    TaintEventKind::SourceCall { spec, args, out, call_chain } => {
+                    TaintEventKind::SourceCall {
+                        spec,
+                        args,
+                        out,
+                        call_chain,
+                    } => {
                         serde_json::json!({
                             "kind":       "SourceCall",
                             "name":       spec.name,
@@ -3006,7 +2994,12 @@ fn run_smt_candidates(
                                               .collect::<Vec<_>>(),
                         })
                     }
-                    TaintEventKind::SinkCall { spec, args, out, call_chain } => {
+                    TaintEventKind::SinkCall {
+                        spec,
+                        args,
+                        out,
+                        call_chain,
+                    } => {
                         serde_json::json!({
                             "kind":       "SinkCall",
                             "name":       spec.name,
@@ -3020,7 +3013,11 @@ fn run_smt_candidates(
                                               .collect::<Vec<_>>(),
                         })
                     }
-                    TaintEventKind::OtherCall { target_addr, args, out } => {
+                    TaintEventKind::OtherCall {
+                        target_addr,
+                        args,
+                        out,
+                    } => {
                         serde_json::json!({
                             "kind":       "OtherCall",
                             "target":     target_addr.map(|a| format!("0x{:x}", a)),
@@ -3065,7 +3062,10 @@ fn run_smt_candidates(
                 "smt-candidates",
                 confidence,
                 rsleigh_decompile::finding::FindingStage::Prove,
-                format!("{} flow from {} to {} ({})", kind, path.source.name, path.sink.name, verdict_str),
+                format!(
+                    "{} flow from {} to {} ({})",
+                    kind, path.source.name, path.sink.name, verdict_str
+                ),
             )
             .with_evidence(evidence);
             record.severity = Some(severity.to_string());
@@ -3105,10 +3105,7 @@ fn run_smt_candidates(
             };
             let chain_penalty = (call_chain.len() as u32).saturating_mul(5);
             let score = source_score + kind_score + verdict_score - chain_penalty.min(50);
-            let dedup_key = format!(
-                "{}|{}|{}|{}",
-                name, path.source.name, path.sink.name, kind
-            );
+            let dedup_key = format!("{}|{}|{}|{}", name, path.source.name, path.sink.name, kind);
             collected.push((payload, score, call_chain.len(), dedup_key));
             per_fn_emitted += 1;
         }
@@ -3147,10 +3144,7 @@ fn run_smt_candidates(
     let _ = out.flush();
     eprintln!(
         "[smt-candidates] emitted: {}, capped: {}, dedup={} top_n={:?}",
-        final_count,
-        total_capped,
-        !no_dedup,
-        top_n
+        final_count, total_capped, !no_dedup, top_n
     );
 }
 
@@ -3161,10 +3155,12 @@ fn run_smt_explore_all(
     segs: &[(u64, u64, u64)],
     dec: &mut rsleigh_api::Decoder,
     json: bool,
-    summaries: Option<&std::collections::HashMap<
-        rsleigh_decompile::callgraph::FuncId,
-        rsleigh_decompile::function_summary::FunctionSummary,
-    >>,
+    summaries: Option<
+        &std::collections::HashMap<
+            rsleigh_decompile::callgraph::FuncId,
+            rsleigh_decompile::function_summary::FunctionSummary,
+        >,
+    >,
 ) {
     let mut hits = 0usize;
     let mut scanned = 0usize;
@@ -3206,12 +3202,21 @@ fn run_smt_explore_all(
         };
         let paths = match summaries {
             Some(s) => collect_paths_with_summaries_named(&ssa, &imports, s, Some(name)),
-            None => collect_paths_with_summaries_named(&ssa, &imports, &std::collections::HashMap::new(), Some(name)),
+            None => collect_paths_with_summaries_named(
+                &ssa,
+                &imports,
+                &std::collections::HashMap::new(),
+                Some(name),
+            ),
         };
         let Ok(paths) = paths else { continue };
         for path in &paths {
             let verdict = solve_with_imports(path, &ssa, &imports);
-            if let SmtFinding::Reachable { input_bytes, call_chain } = verdict {
+            if let SmtFinding::Reachable {
+                input_bytes,
+                call_chain,
+            } = verdict
+            {
                 hits += 1;
                 if json {
                     if !first {
@@ -3253,8 +3258,13 @@ fn run_smt_explore_all(
                     };
                     println!(
                         "{} 0x{:x}  {} -> {}  ({:?})  REACHABLE: {}{}",
-                        name, addr, path.source.name, path.sink.name, path.sink.kind,
-                        preview, chain
+                        name,
+                        addr,
+                        path.source.name,
+                        path.sink.name,
+                        path.sink.kind,
+                        preview,
+                        chain
                     );
                 }
             }
@@ -3263,7 +3273,10 @@ fn run_smt_explore_all(
     if json {
         println!("\n]");
     }
-    eprintln!("[smt-explore-all] {} hits across {} functions scanned", hits, scanned);
+    eprintln!(
+        "[smt-explore-all] {} hits across {} functions scanned",
+        hits, scanned
+    );
 }
 
 fn run_smt_explore(
@@ -3273,10 +3286,12 @@ fn run_smt_explore(
     func_name: &str,
     insts: &[(u64, pcode_ir::Instruction)],
     json: bool,
-    summaries: Option<&std::collections::HashMap<
-        rsleigh_decompile::callgraph::FuncId,
-        rsleigh_decompile::function_summary::FunctionSummary,
-    >>,
+    summaries: Option<
+        &std::collections::HashMap<
+            rsleigh_decompile::callgraph::FuncId,
+            rsleigh_decompile::function_summary::FunctionSummary,
+        >,
+    >,
 ) {
     let cfg = rsleigh_decompile::cfg::build_cfg(insts);
     let cc = match arch {
@@ -3301,13 +3316,17 @@ fn run_smt_explore(
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
     use rsleigh_decompile::smt_explore::{
-        collect_paths_with_summaries_named, solve_with_imports, PathRejection,
-        SmtFinding,
+        collect_paths_with_summaries_named, solve_with_imports, PathRejection, SmtFinding,
     };
 
     let paths_result = match summaries {
         Some(s) => collect_paths_with_summaries_named(&ssa, &imports, s, Some(func_name)),
-        None => collect_paths_with_summaries_named(&ssa, &imports, &std::collections::HashMap::new(), Some(func_name)),
+        None => collect_paths_with_summaries_named(
+            &ssa,
+            &imports,
+            &std::collections::HashMap::new(),
+            Some(func_name),
+        ),
     };
     let paths = match paths_result {
         Ok(p) => p,
@@ -3324,7 +3343,8 @@ fn run_smt_explore(
                 println!(
                     "// {func_name} 0x{func_addr:x} — no v0 paths ({})",
                     match reason {
-                        PathRejection::UnsupportedTerminator(t) => format!("UnsupportedTerminator({t})"),
+                        PathRejection::UnsupportedTerminator(t) =>
+                            format!("UnsupportedTerminator({t})"),
                         PathRejection::PhiInPath => "PhiInPath".to_string(),
                         PathRejection::IndirectCall => "IndirectCall".to_string(),
                         PathRejection::NoSinkFound => "NoSinkFound".to_string(),
@@ -3376,7 +3396,10 @@ fn run_smt_explore(
         });
         println!("{}", serde_json::to_string_pretty(&payload).unwrap());
     } else {
-        println!("// {func_name} 0x{func_addr:x} — {} v0 path(s)", paths.len());
+        println!(
+            "// {func_name} 0x{func_addr:x} — {} v0 path(s)",
+            paths.len()
+        );
         for (i, path) in paths.iter().enumerate() {
             let verdict = solve_with_imports(path, &ssa, &imports);
             print!(
@@ -3384,7 +3407,10 @@ fn run_smt_explore(
                 path.source.name, path.sink.name, path.sink.kind
             );
             match verdict {
-                SmtFinding::Reachable { input_bytes, call_chain } => {
+                SmtFinding::Reachable {
+                    input_bytes,
+                    call_chain,
+                } => {
                     let preview: String = input_bytes
                         .iter()
                         .take(8)
@@ -3463,7 +3489,9 @@ fn decode_func_with_operation_stage(
     let Some((off, available)) = off else {
         return vec![];
     };
-    let max = 4096.min(data.len().saturating_sub(off as usize)).min(available as usize);
+    let max = 4096
+        .min(data.len().saturating_sub(off as usize))
+        .min(available as usize);
     if max == 0 {
         return vec![];
     }
@@ -3602,7 +3630,8 @@ fn decode_func_with_operation_stage(
     let mut io = 0;
     while io < decode_max {
         if let Err(stop) = rsleigh_decompile::budget::decode_step() {
-            diagnostics.push(serde_json::json!({"stage":stop.stage,"code":"execution_limit","stop":stop}));
+            diagnostics
+                .push(serde_json::json!({"stage":stop.stage,"code":"execution_limit","stop":stop}));
             break;
         }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3672,245 +3701,9 @@ fn decompile_func(
     ))
 }
 
-/// Generate a YARA detection rule from binary analysis.
-/// Extracts unique strings, imports, hex patterns, and crypto signatures.
-/// Diff two binaries: decompile both, match functions, show unified diff of changes.
+/// Diff two binaries through the structured comparison model.
 fn diff_binaries(old_path: &str, new_path: &str, func_filter: &[String]) {
-    use std::collections::BTreeMap;
-
-    eprintln!("Comparing: {} vs {}", old_path, new_path);
-
-    // Helper: decompile all functions in a binary, return map of name → pseudocode
-    let decompile_all = |path: &str| -> BTreeMap<String, String> {
-        let data = match std::fs::read(path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Error reading {}: {}", path, e);
-                return BTreeMap::new();
-            }
-        };
-        let obj = match parse_object_lenient(&data) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("Error parsing {}: {}", path, e);
-                return BTreeMap::new();
-            }
-        };
-        let (arch, segs, mut symbols) = match parse_binary(&obj, &data) {
-            Some(r) => r,
-            None => {
-                eprintln!("Unsupported format: {}", path);
-                return BTreeMap::new();
-            }
-        };
-
-        // Discover functions for stripped binaries
-        if symbols.is_empty() {
-            if let goblin::Object::PE(pe) = &obj {
-                let base = pe.image_base as u64;
-                let entry = base
-                    + pe.header
-                        .optional_header
-                        .unwrap()
-                        .standard_fields
-                        .address_of_entry_point as u64;
-                symbols = discover_pe_functions(entry, &segs, &data, arch);
-            }
-        }
-        let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj {
-            elf.syms.len() == 0
-        } else {
-            false
-        };
-        if is_elf_stripped {
-            if let goblin::Object::Elf(elf) = &obj {
-                let discovered = discover_elf_functions(elf, &segs, &data, arch);
-                let existing: std::collections::BTreeSet<u64> =
-                    symbols.iter().map(|(a, _)| *a).collect();
-                for (addr, name) in discovered {
-                    if !existing.contains(&addr) {
-                        symbols.push((addr, name));
-                    }
-                }
-            }
-        }
-
-        let p = std::path::Path::new(path);
-        let import_map = build_import_map(&obj, &data);
-        let mut dec = rsleigh_api::Decoder::new(arch);
-        let mut result = BTreeMap::new();
-
-        for (func_addr, func_name) in &symbols {
-            let off = segs.iter().find_map(|(va, sz, fo)| {
-                if *func_addr >= *va && *func_addr < va + sz {
-                    Some(fo + (func_addr - va))
-                } else {
-                    None
-                }
-            });
-            let Some(off) = off else { continue };
-            let max = 8192.min(data.len().saturating_sub(off as usize));
-            if max < 2 {
-                continue;
-            }
-            let bytes = &data[off as usize..off as usize + max];
-
-            let next_func = symbols
-                .iter()
-                .filter(|(a, _)| *a > *func_addr)
-                .map(|(a, _)| *a)
-                .min()
-                .unwrap_or(func_addr + max as u64);
-            let decode_max = ((next_func - func_addr) as usize).min(max);
-
-            let mut insts = Vec::new();
-            let mut pos = 0;
-            while pos < decode_max {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    dec.decode(&bytes[pos..], func_addr + pos as u64)
-                })) {
-                    Ok(Ok(inst)) => {
-                        let l = inst.len as usize;
-                        if l == 0 {
-                            pos += 1;
-                            continue;
-                        }
-                        insts.push((func_addr + pos as u64, inst));
-                        pos += l;
-                    }
-                    _ => {
-                        pos += 1;
-                    }
-                }
-            }
-
-            if !insts.is_empty() {
-                let output = maybe_annotate_crypto(rsleigh_decompile::decompile_with_binary(
-                    arch,
-                    &insts,
-                    Some(&data),
-                    Some(p),
-                ));
-                if !output.trim().is_empty() {
-                    result.insert(func_name.clone(), output);
-                }
-            }
-        }
-        eprintln!("  {}: {} functions decompiled", path, result.len());
-        result
-    };
-
-    let old_funcs = decompile_all(old_path);
-    let new_funcs = decompile_all(new_path);
-
-    // Match functions and compute diffs
-    let mut all_names: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
-    for k in old_funcs.keys() {
-        all_names.insert(k);
-    }
-    for k in new_funcs.keys() {
-        all_names.insert(k);
-    }
-
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    let mut changed = 0usize;
-    let mut unchanged = 0usize;
-
-    for name in &all_names {
-        // Filter if specific functions requested
-        if !func_filter.is_empty() && !func_filter.iter().any(|f| f.as_str() == name.as_str()) {
-            continue;
-        }
-
-        let old_code = old_funcs.get(*name);
-        let new_code = new_funcs.get(*name);
-
-        match (old_code, new_code) {
-            (None, Some(new)) => {
-                added += 1;
-                println!("=== ADDED: {} ===", name);
-                for line in new.lines() {
-                    println!("\x1b[32m+ {}\x1b[0m", line); // green
-                }
-                println!();
-            }
-            (Some(old), None) => {
-                removed += 1;
-                println!("=== REMOVED: {} ===", name);
-                for line in old.lines() {
-                    println!("\x1b[31m- {}\x1b[0m", line); // red
-                }
-                println!();
-            }
-            (Some(old), Some(new)) => {
-                if old == new {
-                    unchanged += 1;
-                    continue;
-                }
-                changed += 1;
-                println!("=== CHANGED: {} ===", name);
-                // Simple line-by-line diff
-                let old_lines: Vec<&str> = old.lines().collect();
-                let new_lines: Vec<&str> = new.lines().collect();
-                // Use longest common subsequence for basic diff
-                let diff = simple_diff(&old_lines, &new_lines);
-                for (tag, line) in &diff {
-                    match tag {
-                        '-' => println!("\x1b[31m- {}\x1b[0m", line),
-                        '+' => println!("\x1b[32m+ {}\x1b[0m", line),
-                        ' ' => println!("  {}", line),
-                        _ => {}
-                    }
-                }
-                println!();
-            }
-            (None, None) => {}
-        }
-    }
-
-    println!("--- Summary ---");
-    println!("Unchanged: {}", unchanged);
-    println!("Changed:   {}", changed);
-    println!("Added:     {}", added);
-    println!("Removed:   {}", removed);
-}
-
-/// Simple line diff using LCS (longest common subsequence).
-fn simple_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<(char, &'a str)> {
-    // Build LCS table
-    let m = old.len();
-    let n = new.len();
-    let mut dp = vec![vec![0u32; n + 1]; m + 1];
-    for i in 1..=m {
-        for j in 1..=n {
-            if old[i - 1] == new[j - 1] {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
-            }
-        }
-    }
-
-    // Backtrack to produce diff
-    let mut result = Vec::new();
-    let mut i = m;
-    let mut j = n;
-    while i > 0 || j > 0 {
-        if i > 0 && j > 0 && old[i - 1] == new[j - 1] {
-            result.push((' ', old[i - 1]));
-            i -= 1;
-            j -= 1;
-        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
-            result.push(('+', new[j - 1]));
-            j -= 1;
-        } else {
-            result.push(('-', old[i - 1]));
-            i -= 1;
-        }
-    }
-    result.reverse();
-    result
+    agent::legacy_diff(old_path, new_path, func_filter)
 }
 
 /// Build import map from binary for decompilation.
@@ -3969,8 +3762,7 @@ fn run_summary(binary_path: &str, data: &[u8]) {
                 .unwrap()
                 .standard_fields
                 .address_of_entry_point as u64;
-        let existing: std::collections::BTreeSet<u64> =
-            symbols.iter().map(|(a, _)| *a).collect();
+        let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
         for (addr, name) in discover_pe_functions(entry, &segs, data, arch) {
             if !existing.contains(&addr) {
                 symbols.push((addr, name));
@@ -5479,8 +5271,7 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
     // tokens like `.mips`, `.sh4`), then re-use for both the IOC
     // categorizer (filtered to >=6 chars below) and the
     // capability/family classifiers. UTF-16LE pass appended after.
-    let mut texts =
-        rsleigh_decompile::iot_capabilities::extract_printable_runs(data, 4);
+    let mut texts = rsleigh_decompile::iot_capabilities::extract_printable_runs(data, 4);
     // UTF-16LE pass: read pairs (b, 0x00) of printable bytes.
     let mut wide_run: Vec<u8> = Vec::with_capacity(64);
     let mut i = 0usize;
@@ -5518,10 +5309,9 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
     // detection from matching every "foo.exe" / "bar.dll" string. Add to
     // taste; staying conservative beats false positives.
     const TLDS: &[&str] = &[
-        "com", "net", "org", "io", "co", "ru", "cn", "tk", "ml", "ga", "cf",
-        "xyz", "info", "biz", "top", "online", "site", "pro", "dev", "app",
-        "gov", "edu", "mil", "uk", "de", "fr", "jp", "br", "in", "us",
-        "ws", "to", "cc", "su", "icu", "club", "host", "live", "fun", "shop",
+        "com", "net", "org", "io", "co", "ru", "cn", "tk", "ml", "ga", "cf", "xyz", "info", "biz",
+        "top", "online", "site", "pro", "dev", "app", "gov", "edu", "mil", "uk", "de", "fr", "jp",
+        "br", "in", "us", "ws", "to", "cc", "su", "icu", "club", "host", "live", "fun", "shop",
     ];
     let known_tld = |label: &str| TLDS.iter().any(|t| label.eq_ignore_ascii_case(t));
 
@@ -5562,15 +5352,33 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
     let push_domain_if_useful = |domains: &mut BTreeSet<String>, host: &str| {
         // Reject obvious file refs and intra-binary noise.
         let lower = host.to_ascii_lowercase();
-        if lower.ends_with(".dll") || lower.ends_with(".exe") || lower.ends_with(".sys")
-            || lower.ends_with(".pdb") || lower.ends_with(".cpp") || lower.ends_with(".c")
-            || lower.ends_with(".h") || lower.ends_with(".obj") || lower.ends_with(".lib")
-            || lower.ends_with(".cs") || lower.ends_with(".vb") || lower.ends_with(".rs")
-            || lower.ends_with(".py") || lower.ends_with(".js") || lower.ends_with(".ts")
-            || lower.ends_with(".cab") || lower.ends_with(".msi") || lower.ends_with(".log")
-            || lower.ends_with(".tmp") || lower.ends_with(".dat") || lower.ends_with(".ini")
-            || lower.ends_with(".xml") || lower.ends_with(".json") || lower.ends_with(".txt")
-            || lower.ends_with(".crl") || lower.ends_with(".crt") || lower.ends_with(".cer")
+        if lower.ends_with(".dll")
+            || lower.ends_with(".exe")
+            || lower.ends_with(".sys")
+            || lower.ends_with(".pdb")
+            || lower.ends_with(".cpp")
+            || lower.ends_with(".c")
+            || lower.ends_with(".h")
+            || lower.ends_with(".obj")
+            || lower.ends_with(".lib")
+            || lower.ends_with(".cs")
+            || lower.ends_with(".vb")
+            || lower.ends_with(".rs")
+            || lower.ends_with(".py")
+            || lower.ends_with(".js")
+            || lower.ends_with(".ts")
+            || lower.ends_with(".cab")
+            || lower.ends_with(".msi")
+            || lower.ends_with(".log")
+            || lower.ends_with(".tmp")
+            || lower.ends_with(".dat")
+            || lower.ends_with(".ini")
+            || lower.ends_with(".xml")
+            || lower.ends_with(".json")
+            || lower.ends_with(".txt")
+            || lower.ends_with(".crl")
+            || lower.ends_with(".crt")
+            || lower.ends_with(".cer")
             || lower.ends_with(".bak")
         {
             return;
@@ -5583,7 +5391,10 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
             return;
         }
         if !host.split('.').all(|label| {
-            !label.is_empty() && label.bytes().any(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .any(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         }) {
             return;
         }
@@ -5596,7 +5407,10 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
         let pascal_labels = host
             .split('.')
             .filter(|l| {
-                l.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+                l.chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
                     && l.bytes().any(|b| b.is_ascii_lowercase())
             })
             .count();
@@ -5627,14 +5441,17 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
             // Read URL chars until whitespace, control, or " ' < > )
             let url_end = s[scheme_end..]
                 .find(|c: char| {
-                    c.is_whitespace() || c.is_control()
+                    c.is_whitespace()
+                        || c.is_control()
                         || matches!(c, '"' | '\'' | '<' | '>' | ')' | '(' | '`')
                 })
                 .map(|n| scheme_end + n)
                 .unwrap_or(s.len());
             if url_end > scheme_end && url_end - abs >= 10 && url_end - abs <= 2048 {
                 let mut u = s[abs..url_end]
-                    .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '/' | ']' | '}'))
+                    .trim_end_matches(|c: char| {
+                        matches!(c, '.' | ',' | ';' | ':' | '/' | ']' | '}')
+                    })
                     .to_string();
                 // PE security-directory PKCS7 blobs often immediately follow
                 // an embedded URL with one or two ASN.1 DER tag bytes (e.g.
@@ -5674,7 +5491,9 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
                             if after_dot.len() >= 3 {
                                 let tail_start = after_dot
                                     .bytes()
-                                    .position(|b| b == b'\\' || b.is_ascii_uppercase() || b.is_ascii_digit())
+                                    .position(|b| {
+                                        b == b'\\' || b.is_ascii_uppercase() || b.is_ascii_digit()
+                                    })
                                     .unwrap_or(after_dot.len());
                                 let probable_tld_len = tail_start;
                                 let tail_len = after_dot.len() - tail_start;
@@ -5724,8 +5543,25 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
         let path_valid = |s: &str| {
             s.chars().all(|c| {
                 c.is_ascii_alphanumeric()
-                    || matches!(c, '\\' | '/' | '.' | '_' | '-' | ' ' | '%' | '(' | ')'
-                                 | '$' | '~' | '+' | ':' | '@' | '#' | '{' | '}')
+                    || matches!(
+                        c,
+                        '\\' | '/'
+                            | '.'
+                            | '_'
+                            | '-'
+                            | ' '
+                            | '%'
+                            | '('
+                            | ')'
+                            | '$'
+                            | '~'
+                            | '+'
+                            | ':'
+                            | '@'
+                            | '#'
+                            | '{'
+                            | '}'
+                    )
             })
         };
         for tok in s.split_whitespace() {
@@ -5750,26 +5586,33 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
             // of the token must be path-valid.
             else if tok.starts_with('%')
                 && tok.len() >= 5
-                && tok.find('%').and_then(|first| {
-                    tok[first + 1..].find('%').map(|rel| {
-                        let inner = &tok[first + 1..first + 1 + rel];
-                        !inner.is_empty()
-                            && inner.len() >= 2
-                            && inner.len() <= 32
-                            && inner.bytes().all(|b| {
-                                b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
-                            })
+                && tok
+                    .find('%')
+                    .and_then(|first| {
+                        tok[first + 1..].find('%').map(|rel| {
+                            let inner = &tok[first + 1..first + 1 + rel];
+                            !inner.is_empty()
+                                && inner.len() >= 2
+                                && inner.len() <= 32
+                                && inner.bytes().all(|b| {
+                                    b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
+                                })
+                        })
                     })
-                }).unwrap_or(false)
+                    .unwrap_or(false)
                 && path_valid(tok)
             {
                 paths.insert(tok.to_string());
             }
             // Unix-ish absolute paths into common locations
-            else if (tok.starts_with("/tmp/") || tok.starts_with("/var/")
-                || tok.starts_with("/etc/") || tok.starts_with("/usr/")
-                || tok.starts_with("/home/") || tok.starts_with("/root/")
-                || tok.starts_with("/dev/") || tok.starts_with("/proc/"))
+            else if (tok.starts_with("/tmp/")
+                || tok.starts_with("/var/")
+                || tok.starts_with("/etc/")
+                || tok.starts_with("/usr/")
+                || tok.starts_with("/home/")
+                || tok.starts_with("/root/")
+                || tok.starts_with("/dev/")
+                || tok.starts_with("/proc/"))
                 && path_valid(tok)
             {
                 paths.insert(tok.to_string());
@@ -5779,8 +5622,14 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
         // Registry keys — match "HKEY_*", "HKLM\", "HKCU\" prefix and grab
         // the rest of the alphabetic / backslash run.
         for prefix in &[
-            "HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER", "HKEY_CLASSES_ROOT",
-            "HKEY_USERS", "HKEY_CURRENT_CONFIG", "HKLM\\", "HKCU\\", "HKCR\\",
+            "HKEY_LOCAL_MACHINE",
+            "HKEY_CURRENT_USER",
+            "HKEY_CLASSES_ROOT",
+            "HKEY_USERS",
+            "HKEY_CURRENT_CONFIG",
+            "HKLM\\",
+            "HKCU\\",
+            "HKCR\\",
         ] {
             let mut start = 0;
             while let Some(rel) = s[start..].find(prefix) {
@@ -5829,11 +5678,21 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
         // resource catalogs) that catch unrelated env-var fragments.
         if !is_dotnet_identity && s.len() <= 256 {
             for needle in &[
-                "password=", "passwd=",
-                "api_key=", "apikey=", "api-key=",
-                "access_token=", "auth_token=", "auth-token=", "bearer_token=",
-                "bearer ", "client_secret=", "client-secret=",
-                "private_key=", "ssh-rsa ", "-----BEGIN PRIVATE",
+                "password=",
+                "passwd=",
+                "api_key=",
+                "apikey=",
+                "api-key=",
+                "access_token=",
+                "auth_token=",
+                "auth-token=",
+                "bearer_token=",
+                "bearer ",
+                "client_secret=",
+                "client-secret=",
+                "private_key=",
+                "ssh-rsa ",
+                "-----BEGIN PRIVATE",
             ] {
                 if lower.contains(needle) {
                     secrets.insert(s.trim().to_string());
@@ -5974,8 +5833,13 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
         }
     }
 
-    let total = urls.len() + ips.len() + domains.len() + paths.len()
-        + registry.len() + mutexes.len() + secrets.len();
+    let total = urls.len()
+        + ips.len()
+        + domains.len()
+        + paths.len()
+        + registry.len()
+        + mutexes.len()
+        + secrets.len();
     if total == 0 && caps.is_empty() {
         println!("\n(no IOCs found)");
     } else {
@@ -6077,8 +5941,7 @@ fn sigcheck_parse(data: &[u8]) -> Option<SigInfo> {
     if data.len() < 0x40 || &data[..2] != b"MZ" {
         return None;
     }
-    let e_lfanew =
-        u32::from_le_bytes(data[0x3C..0x40].try_into().ok()?) as usize;
+    let e_lfanew = u32::from_le_bytes(data[0x3C..0x40].try_into().ok()?) as usize;
     if e_lfanew + 24 > data.len() {
         return None;
     }
@@ -6100,8 +5963,7 @@ fn sigcheck_parse(data: &[u8]) -> Option<SigInfo> {
     }
     // The Security directory's Address is a FILE OFFSET, not an RVA —
     // documented quirk of PE format. dwLength is byte length.
-    let cert_off =
-        u32::from_le_bytes(data[sec_dir_off..sec_dir_off + 4].try_into().ok()?) as usize;
+    let cert_off = u32::from_le_bytes(data[sec_dir_off..sec_dir_off + 4].try_into().ok()?) as usize;
     let cert_size =
         u32::from_le_bytes(data[sec_dir_off + 4..sec_dir_off + 8].try_into().ok()?) as usize;
     if cert_off == 0 || cert_size == 0 || cert_off + cert_size > data.len() {
@@ -6172,9 +6034,7 @@ fn sigcheck_parse(data: &[u8]) -> Option<SigInfo> {
         }
         let body = &buf[start..start + len];
         let s = match tag {
-            0x13 | 0x0c | 0x16 | 0x14 => {
-                std::str::from_utf8(body).ok().map(|s| s.to_string())
-            }
+            0x13 | 0x0c | 0x16 | 0x14 => std::str::from_utf8(body).ok().map(|s| s.to_string()),
             0x1e => {
                 // BMPString = UTF-16BE
                 if body.len() % 2 != 0 {
@@ -6351,7 +6211,8 @@ fn run_resources(binary_path: &str, data: &[u8], json: bool, dump_dir: Option<&s
                     serde_json::to_string_pretty(&serde_json::json!({
                         "binary": binary_path,
                         "has_resources": false,
-                    })).unwrap()
+                    }))
+                    .unwrap()
                 );
             } else {
                 println!(
@@ -6537,10 +6398,20 @@ impl ResEntry {
         }
         // Generic preview: first 32 bytes hex + ascii.
         let n = blob.len().min(32);
-        let hex: String = blob[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+        let hex: String = blob[..n]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("");
         let ascii: String = blob[..n]
             .iter()
-            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         format!("{}  |{}|", hex, ascii)
     }
@@ -6706,7 +6577,9 @@ fn resources_parse(data: &[u8]) -> Option<Vec<ResEntry>> {
                     v => v as u64,
                 };
                 let data_sz = u32::from_le_bytes(rsrc[de + 4..de + 8].try_into().ok()?) as usize;
-                let Some(fo) = rva_to_fo(data_rva) else { continue };
+                let Some(fo) = rva_to_fo(data_rva) else {
+                    continue;
+                };
                 if fo + data_sz > data.len() {
                     continue;
                 }
@@ -7551,12 +7424,7 @@ fn parse_raw_arch_base(args: &[String]) -> Option<(rsleigh_api::Architecture, u6
 /// MOVW/MOVT pair or PC-relative literal-pool LDR that loads the
 /// address as an immediate (data-flow xref). ARM32 only — silently
 /// returns for other archs because the value-load idioms differ.
-fn run_xrefs_raw(
-    data: &[u8],
-    arch: rsleigh_api::Architecture,
-    base: u64,
-    target_name: &str,
-) {
+fn run_xrefs_raw(data: &[u8], arch: rsleigh_api::Architecture, base: u64, target_name: &str) {
     if !matches!(arch, rsleigh_api::Architecture::ARM32) {
         eprintln!("--xrefs raw mode currently only supports --raw arm");
         return;
@@ -7621,7 +7489,10 @@ fn run_xrefs_raw(
         }
     }
     if !adr_hits.is_empty() {
-        println!("// ADR (PC-relative ADD/SUB) sites computing {:#x}:", target);
+        println!(
+            "// ADR (PC-relative ADD/SUB) sites computing {:#x}:",
+            target
+        );
         for a in &adr_hits {
             println!("//   {:#x}  ADR r{}, #{:#x}", a.addr, a.rd, a.target);
         }
@@ -7731,7 +7602,11 @@ fn run_search_raw(
         println!("//   ... and {} more", data_hits.len() - 64);
     }
     if matches!(arch, rsleigh_api::Architecture::ARM32) {
-        println!("// MOVW/MOVT pairs building {:#x}: {}", value, pair_hits.len());
+        println!(
+            "// MOVW/MOVT pairs building {:#x}: {}",
+            value,
+            pair_hits.len()
+        );
         for (a, rd) in &pair_hits {
             println!("//   {:#x}  → r{}", a, rd);
         }
@@ -7847,11 +7722,7 @@ fn run_string_search_raw(
         return;
     }
 
-    println!(
-        "// String search for {:?}: {} match(es)",
-        query,
-        hits.len()
-    );
+    println!("// String search for {:?}: {} match(es)", query, hits.len());
     // String pointers in firmware often target the start of an
     // enclosing line (e.g. printf format like "[tsk-ble]:FOO"),
     // not the substring the user happened to search for. Tolerate
@@ -7867,7 +7738,10 @@ fn run_string_search_raw(
         let lit_refs: Vec<_> = lits.iter().filter(|l| in_window(l.value as u64)).collect();
         let adr_refs: Vec<_> = adrs.iter().filter(|a| in_window(a.target)).collect();
         if pair_refs.is_empty() && lit_refs.is_empty() && adr_refs.is_empty() {
-            println!("//   (no static references found within ±{} bytes)", REF_WINDOW);
+            println!(
+                "//   (no static references found within ±{} bytes)",
+                REF_WINDOW
+            );
             continue;
         }
         for p in pair_refs {
@@ -8025,7 +7899,8 @@ fn run_raw(
                 } else {
                     (imm24 as i32) << 2
                 };
-                let target = (base as i64 + i as i64 + 8 + off_signed as i64 + ((h << 1) as i64)) as u64;
+                let target =
+                    (base as i64 + i as i64 + 8 + off_signed as i64 + ((h << 1) as i64)) as u64;
                 let canon = target & !1;
                 if canon >= base && canon < code_end {
                     found.insert(target | 1); // Thumb mode
@@ -8054,7 +7929,8 @@ fn run_raw(
                 let i2 = (!(j2 ^ s)) & 1;
                 let imm10 = hw1 & 0x3FF;
                 let imm11 = hw2 & 0x7FF;
-                let mut offset: i32 = ((i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1)) as i32;
+                let mut offset: i32 =
+                    ((i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1)) as i32;
                 if s != 0 {
                     offset |= 0xFF00_0000u32 as i32; // sign-extend bit 24
                 }
@@ -8112,35 +7988,63 @@ fn run_raw(
     //
     // This cuts false positives by ~80% while preserving real functions.
     let is_arm_prologue = |off: usize| -> bool {
-        if off + 4 > data.len() { return false; }
-        let w = u32::from_le_bytes(data[off..off+4].try_into().unwrap_or([0;4]));
+        if off + 4 > data.len() {
+            return false;
+        }
+        let w = u32::from_le_bytes(data[off..off + 4].try_into().unwrap_or([0; 4]));
         // STMFD/PUSH cond=AL with lr in reg list
-        if (w & 0xFFFF0000) == 0xE92D0000 && (w & 0x4000) != 0 { return true; }
-        if (w & 0xFFFF0000) == 0xE92D0000 && (w & 0x4FF0) == 0x4FF0 { return true; }
+        if (w & 0xFFFF0000) == 0xE92D0000 && (w & 0x4000) != 0 {
+            return true;
+        }
+        if (w & 0xFFFF0000) == 0xE92D0000 && (w & 0x4FF0) == 0x4FF0 {
+            return true;
+        }
         // mov r12, sp / sub sp, sp, #imm / str lr, [sp, #-4]!
-        if w == 0xE1A0C00D { return true; }
-        if (w & 0xFFFFFF00) == 0xE24DD000 { return true; }
-        if w == 0xE52DE004 { return true; }
+        if w == 0xE1A0C00D {
+            return true;
+        }
+        if (w & 0xFFFFFF00) == 0xE24DD000 {
+            return true;
+        }
+        if w == 0xE52DE004 {
+            return true;
+        }
         // BX lr (leaf function — tiny but valid entry)
-        if w == 0xE12FFF1E { return true; }
+        if w == 0xE12FFF1E {
+            return true;
+        }
         // Conditional ARM prologues (cond != AL)
-        if (w & 0x0FFF0000) == 0x092D0000 && (w & 0x4000) != 0 { return true; }
+        if (w & 0x0FFF0000) == 0x092D0000 && (w & 0x4000) != 0 {
+            return true;
+        }
         false
     };
     let is_thumb_prologue = |off: usize| -> bool {
-        if off + 2 > data.len() { return false; }
+        if off + 2 > data.len() {
+            return false;
+        }
         let b0 = data[off];
-        let b1 = data[off+1];
+        let b1 = data[off + 1];
         // 16-bit Thumb push: b4 xx (push regs), b5 xx (push regs+lr)
-        if b1 == 0xB5 || b1 == 0xB4 { return true; }
+        if b1 == 0xB5 || b1 == 0xB4 {
+            return true;
+        }
         // sub sp, #imm: b0 80..ff (with bit 7 set means subtract)
-        if b1 == 0xB0 && (b0 & 0x80) != 0 { return true; }
+        if b1 == 0xB0 && (b0 & 0x80) != 0 {
+            return true;
+        }
         // 32-bit Thumb-2 PUSH.W: 2d e9 (LE = e92d big-endian read)
-        if b0 == 0x2D && b1 == 0xE9 { return true; }
+        if b0 == 0x2D && b1 == 0xE9 {
+            return true;
+        }
         // BX lr 16-bit: 70 47
-        if b0 == 0x70 && b1 == 0x47 { return true; }
+        if b0 == 0x70 && b1 == 0x47 {
+            return true;
+        }
         // MOVS Rn, #imm or similar common Thumb entry pattern: 4f f0 ?? ??
-        if b0 == 0x4F && b1 == 0xF0 { return true; }
+        if b0 == 0x4F && b1 == 0xF0 {
+            return true;
+        }
         false
     };
 
@@ -8151,7 +8055,9 @@ fn run_raw(
             // contains a real entry).
             let canon = addr & !1;
             let off = (canon - base) as usize;
-            if off >= data.len() { return None; }
+            if off >= data.len() {
+                return None;
+            }
 
             if matches!(arch, rsleigh_api::Architecture::ARM32) {
                 let want_thumb = (addr & 1) == 1;

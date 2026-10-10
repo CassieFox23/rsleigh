@@ -21,7 +21,6 @@
 use std::path::Path;
 use std::process::Command;
 
-
 fn build_arm_thumb_blob() -> Vec<u8> {
     // Layout (file offset → bytes):
     //   0x00: ARM caller   `bl  +0x40` jumps to thumb fn @ 0x44
@@ -85,15 +84,15 @@ fn build_arm_thumb_blob() -> Vec<u8> {
     buf
 }
 
-
 fn cli_binary() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
-    if p.ends_with("deps") { p.pop(); }
+    if p.ends_with("deps") {
+        p.pop();
+    }
     p.push("rsleigh");
     p
 }
-
 
 #[test]
 fn prologue_validation_drops_false_positives() {
@@ -105,20 +104,26 @@ fn prologue_validation_drops_false_positives() {
     std::fs::write(&blob_path, &blob).unwrap();
 
     let bin = cli_binary();
-    assert!(Path::new(&bin).exists(),
-            "rsleigh CLI binary not built — run cargo build first");
+    assert!(
+        Path::new(&bin).exists(),
+        "rsleigh CLI binary not built — run cargo build first"
+    );
 
     let out = Command::new(&bin)
         .arg(&blob_path)
-        .arg("--raw").arg("arm32")
+        .arg("--raw")
+        .arg("arm32")
         .output()
         .expect("failed to run rsleigh");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(),
-            "rsleigh exited non-zero\nstderr: {}\nstdout: {}",
-            stderr, stdout);
+    assert!(
+        out.status.success(),
+        "rsleigh exited non-zero\nstderr: {}\nstdout: {}",
+        stderr,
+        stdout
+    );
 
     // Expected:
     //   - base 0x00 has ARM prologue (push {r4,lr}) → kept
@@ -127,7 +132,8 @@ fn prologue_validation_drops_false_positives() {
     //
     // Pre-fix, 0x80 would be listed because the BL at 0x10 targeted it.
     let lines: Vec<&str> = stdout.lines().collect();
-    let func_lines: Vec<&str> = lines.iter()
+    let func_lines: Vec<&str> = lines
+        .iter()
         .filter(|l| l.contains("FUN_"))
         .copied()
         .collect();
@@ -135,10 +141,16 @@ fn prologue_validation_drops_false_positives() {
     let has_thumb_target = func_lines.iter().any(|l| l.contains("00000049"));
     let has_garbage = func_lines.iter().any(|l| l.contains("00000080"));
 
-    assert!(has_thumb_target,
-            "ARM BLX target should have been discovered as Thumb (LSB=1 @ 0x49). \
-             Got:\n{}", stdout);
-    assert!(!has_garbage,
-            "garbage address 0x80 should have been dropped by prologue validation. \
-             Got:\n{}", stdout);
+    assert!(
+        has_thumb_target,
+        "ARM BLX target should have been discovered as Thumb (LSB=1 @ 0x49). \
+             Got:\n{}",
+        stdout
+    );
+    assert!(
+        !has_garbage,
+        "garbage address 0x80 should have been dropped by prologue validation. \
+             Got:\n{}",
+        stdout
+    );
 }

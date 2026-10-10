@@ -14,6 +14,15 @@ For the completed implementation and validation evidence, see the
 ## Start a session
 
 Use the [command guide](cli-reference.md) for syntax and input-type limits.
+Discover the operations, flags, limits, and per-architecture support that this
+build implements before choosing a command; discovery reads no target:
+
+```bash
+rsleigh --capabilities --json > capabilities.json
+jq '.operations[] | {id, usage, schema}' capabilities.json
+jq '.architectures[] | {id, stages, dependency_queries}' capabilities.json
+```
+
 For a parsed PE, ELF, or Mach-O target:
 
 ```bash
@@ -68,6 +77,7 @@ rsleigh sample.exe 0x140001000 --card --pcode --decompile
 | Is a named flow reachable in the model? | `--smt-candidates FUNCTION` | solver result over modeled paths | Require `verdict == "Reachable"`; review unsupported operations and bounds. |
 | Will analysis span several turns? | `--index DIR` | reusable bounded map | Run `--verify-index DIR`; pin the manifest generation for queries. |
 | Is the input raw firmware? | `--raw ARCH --base ADDR` on every command | caller-supplied file context | Never infer the ISA, mode, endianness, or image base from output alone. |
+| What changed between two builds? | `OLD --compare NEW --json [--pair OLD:NEW]` | per-dimension comparison | `unknown` is not `unchanged`; unmatched names are `absent` only against a complete inventory. See [comparison](cli-reference.md#compare-two-builds). |
 
 Do not use pseudocode to answer an instruction-semantics question when P-code
 is available. Do not use a bounded brief to claim that no other findings exist.
@@ -449,6 +459,131 @@ next counted unit. Stopped slice queries return `slice: null` and a bounded
 decoded evidence survives; exit 1 means no instruction evidence is available.
 Stopped analysis is never published as a complete cache snapshot.
 
+## Portable evidence
+
+Briefs, cards, and slices can wrap their unchanged payload in an
+`rsleigh.evidence/v1` record. `--evidence` prints the record instead of the bare
+payload; `--evidence-store STORE` also persists it as
+`STORE/records/<hex>.json`. Exit statuses are those of the wrapped operation.
+
+```bash
+rsleigh FILE FUNCTION --card --pcode --evidence-store inv/ > card.json
+rsleigh FILE --ssa-slice FUNCTION --return --evidence-store inv/ \
+  --derived-from "$(jq -r .id card.json)" > slice.json
+```
+
+A record binds the payload to its `subject` (binary SHA-256, format,
+architecture, image base), `producer` (package version, linked build, and
+profile: opaque folding plus companion PDB/dSYM hashes), the operation and its
+semantic `parameters`, `status`, derived `coverage` and `limitations`, and
+`references` to other records. The `id` is `sha256:` over a canonical
+projection that excludes the absolute binary path, cache counters, timings, and
+other `execution` metadata, so a cold run, a warm cache hit, a function name or
+its address, and a copied binary yield the same ID. A different page, binary,
+build, or profile yields a different ID. Records are idempotent in a store: the
+first stored execution is kept.
+
+`--derived-from ID` (repeatable) links a record to stored evidence for the
+same binary; it requires `--evidence-store`, and missing or foreign evidence
+fails with `missing_evidence` or `invalid_combination`. Execution status,
+coverage, and claim strength stay separate: `status` is `ok | partial | failed`,
+`coverage.complete` reports whether the observation is whole (a later card page
+or a slice with boundaries is not), and finding `confidence` keeps its
+`pattern | heuristic | proved` meaning within each finding's producer.
+
+Export, verify, and import a handoff bundle:
+
+```bash
+rsleigh FILE --export-bundle handoff/ --evidence-store inv/ [--record ID]...
+rsleigh --verify-bundle handoff/          # integrity only: status partial, exit 2
+rsleigh FILE --verify-bundle handoff/     # adds source binding: exit 0
+rsleigh --import-bundle handoff/ --evidence-store other-store/
+```
+
+Export takes every record for FILE (or the selected `--record` IDs) plus the
+transitive closure of their references, and publishes an
+`rsleigh.evidence-bundle/v1` generation with the same immutable-generation
+machinery as indexes. Binaries and caches are never copied. A bundle holds one
+target; a missing dependency fails export instead of being dropped.
+
+`--verify-bundle` is offline. It checks both manifest copies, artifact sizes and
+checksums, every record's schema and recomputed content ID, derived coverage
+and limitations, the single shared subject, closed references, and declared
+coverage counts. Without FILE it reports `source_binding: "not_checked"` and
+exits 2 because only integrity was verified. Import verifies first, then copies
+records as observations: it never executes saved commands and never treats
+imported analysis as a trusted runtime cache. Checksums establish consistency,
+not the truth or authorship of an analyst's claims.
+
+## Track questions across sessions
+
+An investigation directory holds the question, the target identity, its own
+evidence store (`records/`), and immutable revisions. Record evidence into the
+same directory with `--evidence-store`:
+
+```bash
+rsleigh FILE --investigate inv/ --question "What does 0x401000 return?" --require ssa-slice
+rsleigh FILE --ssa-slice 0x401000 --return --evidence-store inv/ > slice.json
+rsleigh --investigation inv/ --expect-revision 1 --add-unknowns "$(jq -r .id slice.json)"
+rsleigh --investigation inv/                     # JSON view: pending, evidence, next_queries
+rsleigh --investigation inv/ --handoff > HANDOFF.md
+```
+
+`--investigation DIR` without an action prints an
+`rsleigh.investigation-view/v1` object and reads no binary: a second process
+sees `pending` questions and `next_queries` without repeating discovery.
+Supplying FILE first (`rsleigh FILE --investigation DIR`) checks that FILE is
+the investigation's target and uses its path in rendered commands.
+
+Each update applies exactly one action and must name the revision it read with
+`--expect-revision N`; a stale revision fails with `stale_revision` and
+changes nothing. `revisions/NNNNNN.json` files are never rewritten;
+`investigation.json` mirrors the latest.
+
+| Action | Effect |
+|---|---|
+| `--add-question TEXT [--require OPERATION]...` | Add an analyst question; `--require` names evidence an answer must cite (`agent-brief`, `card`, `ssa-slice`, `compare`) |
+| `--add-unknowns ID [--node INDEX]...` | Track unresolved boundaries from a stored slice record (default: every boundary node) |
+| `--observe TEXT --cite ID...` | Record an observation; at least one evidence ID is required |
+| `--infer TEXT [--cite ID]...` | Record an analyst inference, always `provisional` |
+| `--support ISSUE --cite ID...` / `--contradict ISSUE --cite ID...` | Attach supporting or contradicting evidence; both are kept |
+| `--resolve ISSUE --disposition answered\|withdrawn\|out-of-scope [--note TEXT] [--cite ID]...` | Close an issue |
+
+Slice boundaries become issues keyed by target and producer profile, the root
+selector, the invocation context's call chain, the node's origin, and the
+boundary reason, so re-recording the same slice or rerunning it with other
+traversal limits does not duplicate an unknown. Warnings are never imported
+automatically; add broader questions explicitly.
+
+`answered` requires cited (or supporting) evidence that is present in the
+store, describes the target, did not fail, and satisfies every declared
+requirement; otherwise it fails with `missing_evidence` or
+`requirements_unmet`. Its resolution records
+`validation: "references_and_requirements_checked"`: the references and
+declared requirements check out, which is not an automatic proof of the
+natural-language answer. `withdrawn` and `out-of-scope` record
+`validation: "analyst_disposition_only"` and never count as verified answers.
+
+`next_queries` are generated from the capability catalog for each open issue
+and validated against their operation contract. A traversal limit is raised
+up to its cap (keeping the other original limits); a call boundary on an
+architecture without helper traversal (MIPS32, RISC-V) suggests a card and a
+`platform_note` instead of an unsupported slice; values entering from outside a
+function also suggest locating callers. `--shell posix|powershell` selects the
+quoting of the rendered `command`; `argv` keeps a `FILE` placeholder.
+Nothing is executed automatically.
+
+Export an investigation with its revisions and evidence, then import it
+elsewhere:
+
+```bash
+rsleigh FILE --export-bundle handoff/ --investigation inv/
+rsleigh --import-bundle handoff/ --investigation inv-copy/   # destination must be new
+```
+
+Bundle verification also checks that revisions are contiguous, that the
+document is the latest revision, and that every cited record is in the bundle.
+
 ## LLM reporting contract
 
 Every conclusion should carry enough provenance for another analyst or model to
@@ -500,6 +635,9 @@ are unknown.
 - If a command is empty, slow, or unexpectedly formatted, consult
   [troubleshooting](troubleshooting.md) before retrying with a larger budget.
 
-For a multi-turn handoff, save the report format above alongside the validated brief,
-selected evidence files, and diagnostics. Name the next question and exact
-command so another agent can resume without repeating discovery.
+For a multi-turn handoff, prefer an [investigation](#track-questions-across-sessions)
+and an exported bundle: they keep the question, cited evidence, unresolved
+boundaries, and next commands together. Otherwise save the report format above
+alongside the validated brief, selected evidence files, and diagnostics. Name
+the next question and exact command so another agent can resume without
+repeating discovery.

@@ -13,24 +13,57 @@ mod re_traversal;
 fn native_memory_and_helper_dependencies_retain_scoped_evidence_and_cache_reuse() {
     let (root, binary) = fixture();
     std::fs::write(&binary, re_traversal::binary()).unwrap();
-    for (function, site, store) in [("0x401040", "0x401050", 0x401043u64), ("0x401060", "0x40106f", 0x401060)] {
-        let (code, value) = invoke(&binary, &["--ssa-slice", function, "--return", "--at", site]);
+    for (function, site, store) in [
+        ("0x401040", "0x401050", 0x401043u64),
+        ("0x401060", "0x40106f", 0x401060),
+    ] {
+        let (code, value) = invoke(
+            &binary,
+            &["--ssa-slice", function, "--return", "--at", site],
+        );
         assert!(matches!(code, 0 | 2), "{value}");
         assert_eq!(value["slice"]["nodes"][0]["constant"], 73, "{value}");
         assert_eq!(value["slice"]["complete"], true, "{value}");
-        assert!(value["evidence"]["operations"].as_array().unwrap().iter().any(|o|
-            o["origin"]["instruction_address"] == store && o["operation"]["opcode"] == "store"));
+        assert!(value["evidence"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["origin"]["instruction_address"] == store
+                && o["operation"]["opcode"] == "store"));
     }
     let cache = root.join("cache");
-    let args = ["--ssa-slice", "0x401000", "--return", "--at", "0x40100a", "--analysis-cache", cache.to_str().unwrap()];
+    let args = [
+        "--ssa-slice",
+        "0x401000",
+        "--return",
+        "--at",
+        "0x40100a",
+        "--analysis-cache",
+        cache.to_str().unwrap(),
+    ];
     let (code, first) = invoke(&binary, &args);
     assert!(matches!(code, 0 | 2), "{first}");
     assert_eq!(first["slice"]["complete"], true, "{first}");
-    assert_eq!(first["slice"]["contexts"].as_array().unwrap().len(), 2, "{first}");
-    assert!(first["slice"]["nodes"].as_array().unwrap().iter().any(|n|
-        n["function_address"] == 0x401020u64 && n["links"].as_array().unwrap().iter().any(|l| l["kind"] == "argument_binding")));
-    assert!(first["slice"]["nodes"].as_array().unwrap().iter().any(|n|
-        n["function_address"] == 0x401000u64 && n["constant"] == 17));
+    assert_eq!(
+        first["slice"]["contexts"].as_array().unwrap().len(),
+        2,
+        "{first}"
+    );
+    assert!(first["slice"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["function_address"] == 0x401020u64
+            && n["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["kind"] == "argument_binding")));
+    assert!(first["slice"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["function_address"] == 0x401000u64 && n["constant"] == 17));
     let mut warm_args = args.to_vec();
     warm_args.extend(["--max-ssa-work", "0", "--max-decode-instructions", "0"]);
     let (_, warm) = invoke(&binary, &warm_args);
@@ -38,15 +71,37 @@ fn native_memory_and_helper_dependencies_retain_scoped_evidence_and_cache_reuse(
     assert_eq!(first["evidence"], warm["evidence"]);
     assert_eq!(warm["metrics"]["execution"]["ssa_work"], 0);
     assert_eq!(warm["metrics"]["execution"]["decode_instructions"], 0);
-    assert!(warm["metrics"]["functions"].as_array().unwrap().iter().all(|f| f["metrics"]["cache"] == "hit"));
-    for (flag, limit, reason) in [("--max-call-depth", "0", "call_depth_limit"), ("--max-functions", "1", "function_limit")] {
-        let mut limited = args.to_vec(); limited.extend([flag, limit]);
+    assert!(warm["metrics"]["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["metrics"]["cache"] == "hit"));
+    for (flag, limit, reason) in [
+        ("--max-call-depth", "0", "call_depth_limit"),
+        ("--max-functions", "1", "function_limit"),
+    ] {
+        let mut limited = args.to_vec();
+        limited.extend([flag, limit]);
         let (_, value) = invoke(&binary, &limited);
         assert_eq!(value["slice"]["complete"], false);
-        assert!(value["slice"]["nodes"].as_array().unwrap().iter().any(|n| n["boundary"] == reason));
+        assert!(value["slice"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["boundary"] == reason));
     }
-    let (_, recursive) = invoke(&binary, &["--ssa-slice", "0x401080", "--return", "--at", "0x401085"]);
-    assert!(recursive["slice"]["nodes"].as_array().unwrap().iter().any(|n| n["boundary"] == "recursion_limit"), "{recursive}");
+    let (_, recursive) = invoke(
+        &binary,
+        &["--ssa-slice", "0x401080", "--return", "--at", "0x401085"],
+    );
+    assert!(
+        recursive["slice"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["boundary"] == "recursion_limit"),
+        "{recursive}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -59,13 +114,40 @@ fn native_ambiguous_memory_keeps_its_boundary_after_copy_folding() {
     let code = b"\x83\xec\x04\xc7\x04\x24\x49\x00\x00\x00\x89\x01\x8b\x04\x24\x83\xc4\x04\xc3";
     bytes[0x240..0x240 + code.len()].copy_from_slice(code);
     std::fs::write(&binary, bytes).unwrap();
-    let (code, value) = invoke(&binary, &["--ssa-slice", "0x401040", "--return", "--at", "0x401052"]);
+    let (code, value) = invoke(
+        &binary,
+        &["--ssa-slice", "0x401040", "--return", "--at", "0x401052"],
+    );
     assert_eq!(code, 2, "{value}");
     assert_eq!(value["slice"]["complete"], false);
-    assert!(value["slice"]["nodes"].as_array().unwrap().iter().any(|n| n["boundary"] == "ambiguous_alias"), "{value}");
-    let (_, limited) = invoke(&binary, &["--ssa-slice", "0x401040", "--return", "--at", "0x401052", "--max-traversal-work", "0"]);
+    assert!(
+        value["slice"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["boundary"] == "ambiguous_alias"),
+        "{value}"
+    );
+    let (_, limited) = invoke(
+        &binary,
+        &[
+            "--ssa-slice",
+            "0x401040",
+            "--return",
+            "--at",
+            "0x401052",
+            "--max-traversal-work",
+            "0",
+        ],
+    );
     assert_eq!(limited["slice"]["stops"][0], "traversal_work_limit");
-    assert!(limited["evidence"]["partial_functions"][0]["instructions"].as_array().unwrap().len() > 0);
+    assert!(
+        limited["evidence"]["partial_functions"][0]["instructions"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 0
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -723,8 +805,14 @@ fn cached_followup_reuses_ssa_and_recovers_from_corrupt_or_interrupted_generatio
     let key = cache.join(first["metrics"]["snapshot_id"].as_str().unwrap());
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(key.join("index.json")).unwrap()).unwrap();
-    assert!(matches!(manifest["identity"]["tool_build"]["kind"].as_str(),Some("macho_uuid"|"elf_build_id"|"sha256")));
-    assert!(!manifest["identity"]["tool_build"]["id"].as_str().unwrap().is_empty());
+    assert!(matches!(
+        manifest["identity"]["tool_build"]["kind"].as_str(),
+        Some("macho_uuid" | "elf_build_id" | "sha256")
+    ));
+    assert!(!manifest["identity"]["tool_build"]["id"]
+        .as_str()
+        .unwrap()
+        .is_empty());
     assert_eq!(manifest["identity"]["architecture"], "X86_32");
     let payload = key.join(manifest["files"][0]["path"].as_str().unwrap());
     std::fs::write(&payload, b"corrupt").unwrap();
@@ -768,8 +856,15 @@ fn slice_origins_resolve_to_typed_card_operations_in_the_same_binary() {
     for task in re_seed::tasks() {
         let function = format!("0x{:x}", task.function);
         let flags: Vec<String> = match task.selector {
-            re_seed::Selector::Return(site) => vec!["--return".into(), "--at".into(), format!("0x{site:x}")],
-            re_seed::Selector::Argument(site, index) => vec!["--call-site".into(), format!("0x{site:x}"), "--arg".into(), index.to_string()],
+            re_seed::Selector::Return(site) => {
+                vec!["--return".into(), "--at".into(), format!("0x{site:x}")]
+            }
+            re_seed::Selector::Argument(site, index) => vec![
+                "--call-site".into(),
+                format!("0x{site:x}"),
+                "--arg".into(),
+                index.to_string(),
+            ],
             re_seed::Selector::Condition(site) => vec!["--condition".into(), format!("0x{site:x}")],
         };
         let mut args = vec!["--ssa-slice", function.as_str()];
@@ -779,7 +874,10 @@ fn slice_origins_resolve_to_typed_card_operations_in_the_same_binary() {
         assert_eq!(slice["schema"], "rsleigh.ssa-slice/v3");
         assert_eq!(card["schema"], "rsleigh.card/v2");
         assert_eq!(slice["file_sha256"], card["file"]["sha256"]);
-        assert_eq!(slice["evidence"]["snapshot_id"], slice["metrics"]["snapshot_id"]);
+        assert_eq!(
+            slice["evidence"]["snapshot_id"],
+            slice["metrics"]["snapshot_id"]
+        );
         assert_eq!(slice["metrics"]["snapshot_id"].as_str().unwrap().len(), 64);
         let evidence = slice["evidence"]["operations"].as_array().unwrap();
         for node in slice["slice"]["nodes"].as_array().unwrap() {
@@ -789,17 +887,26 @@ fn slice_origins_resolve_to_typed_card_operations_in_the_same_binary() {
             for origin in origins {
                 let raw = evidence.iter().find(|op| &op["origin"] == origin).unwrap();
                 let address = format!("0x{:x}", origin["instruction_address"].as_u64().unwrap());
-                let card_op = card["operations"].as_array().unwrap().iter().find(|op|
-                    op["address"] == address && op["operation_index"] == origin["operation_index"]
-                ).unwrap();
+                let card_op = card["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|op| {
+                        op["address"] == address
+                            && op["operation_index"] == origin["operation_index"]
+                    })
+                    .unwrap();
                 assert_eq!(raw["operation"], card_op["operation"]);
                 assert_eq!(raw["op"], card_op["op"]);
                 assert!(raw["operation"]["opcode"].is_string());
             }
         }
         if task.id == "return-seven" {
-            assert!(evidence.iter().any(|op| op["origin"]["instruction_address"] == 0x401000u64
-                && op["operation"]["opcode"] == "copy" && op["operation"]["input"]["offset"] == 7));
+            assert!(evidence
+                .iter()
+                .any(|op| op["origin"]["instruction_address"] == 0x401000u64
+                    && op["operation"]["opcode"] == "copy"
+                    && op["operation"]["input"]["offset"] == 7));
         }
     }
     std::fs::remove_dir_all(root).unwrap();

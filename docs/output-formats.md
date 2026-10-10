@@ -1,13 +1,24 @@
 # Output formats and validation
 
 Choose a renderer explicitly and validate the artifact it actually produces.
-The CLI does not have a universal JSON mode or a uniform error envelope.
+The CLI does not have a universal JSON mode. Agent operations share one failure
+envelope (`status: "failed"`, `error`, stable `error_code`, `diagnostics`);
+legacy modes do not.
 
 ## Format map
 
 | Command mode | Stdout / files | Expected shape |
 |---|---|---|
+| `--capabilities --json` | One JSON object | `rsleigh.capabilities/v1`; operations, frontends, architectures, error codes |
+| `--version --json` | One JSON object | `rsleigh.version/v1`; package version and linked build identity |
 | `--agent-brief` | One JSON object | `schema: rsleigh.agent-brief/v1`; reject `error` |
+| `--evidence` / `--evidence-store STORE` on a brief, card, or slice | One JSON object | `rsleigh.evidence/v1` wrapping the unchanged payload |
+| `--export-bundle BUNDLE` | JSON manifest and generation files | `rsleigh.evidence-bundle/v1`; records, subject, coverage, checksums |
+| `--verify-bundle BUNDLE` | One JSON object | `rsleigh.bundle-verification/v1`; checks and record status counts |
+| `--import-bundle BUNDLE` | One JSON object | `rsleigh.bundle-import/v1`; imported/existing counts |
+| `--investigate DIR` / `--investigation DIR` | One JSON object | `rsleigh.investigation-view/v1` wrapping an `rsleigh.investigation/v1` document |
+| `--investigation DIR --handoff` | Markdown | Question, unresolved/closed issues, observations, inferences, evidence, history |
+| `FILE --compare NEW --json` | One JSON object | `rsleigh.function-comparison/v1`; per-pair dimensions, unmatched, ambiguous, suggestions, summary |
 | `--index DIR` | JSON manifest and generation files | `rsleigh.index/v2`; checksums and paths for four artifacts |
 | `--verify-index DIR` | One JSON object | `rsleigh.index-verification/v1`; validity and analysis status |
 | `--ssa-slice FUNCTION` with a root selector | One JSON object | `rsleigh.ssa-slice/v3`; bounded dependencies, boundaries, and resolved `selection` |
@@ -106,6 +117,79 @@ analysis may pass verification; inspect `analysis_status` before drawing
 conclusions. Retain one manifest when querying multiple files so a concurrent
 rebuild cannot mix generations. See [agent workflow](agent-workflow.md#--index)
 for migration from version 1 and the publication contract.
+
+## Evidence records and bundles
+
+An `rsleigh.evidence/v1` record has these top-level fields:
+
+| Field | Meaning | In content ID |
+|---|---|---|
+| `id` | `sha256:` + hex digest of the canonical projection | — |
+| `canonicalization` | `rsleigh.evidence-canonical/v1` | yes |
+| `kind`, `operation` | Operation ID, payload schema, normalized semantic `parameters` | yes |
+| `subject` | `binary_sha256`, `format`, `architecture`, `imagebase`, `mode` | yes |
+| `producer` | `version`, linked `build`, and `profile` (opaque folding, companion hashes) | yes |
+| `status`, `coverage`, `limitations` | Execution status and payload-derived completeness/warnings | yes |
+| `interpretation` | Trust vocabulary for the payload's layers | yes |
+| `references` | Sorted IDs of records this one builds on | yes |
+| `payload` | The operation's unchanged JSON output | yes, minus incidental fields |
+| `execution` | argv, exit code, recording time | no |
+
+Canonicalization v1 removes `id` and `execution`, then removes these payload
+fields: `metrics`, `tool_version`, `file.path`, `source`, `findings[].binary`,
+`old.file.path`, and `new.file.path`. The remaining JSON is serialized with
+object keys sorted by UTF-8 bytes and no insignificant whitespace. Parameters
+keep only flags whose catalog `role` is `semantic`: counts become numbers,
+addresses lowercase hexadecimal, and function targets the resolved address.
+Cache, budget, rendering, and evidence flags are not parameters; when a budget
+stops analysis, the stop appears in the payload diagnostics instead.
+
+Bundles reuse the index generation layout: root and generation `index.json`
+plus one `record-<hex>.json` per record. The manifest lists each record's `id`,
+`kind`, `status`, `file`, and `references`, the shared `subject`, the exporting
+tool, and `coverage` counts (`records`, `ok`, `partial`, `failed`, `complete`).
+Verification recomputes all of these and fails with `verification_failed` on
+any difference, undeclared artifact, mixed target, or unresolved reference.
+
+## Investigation documents
+
+An `rsleigh.investigation/v1` document contains `id`, `revision`, `question`,
+`target` (the evidence `subject`), `file_hint`, `created_by`, `issues`,
+`observations`, `inferences`, and one `history` entry per revision. An issue has
+`id` (`q-` analyst question, `u-` slice boundary), `origin`, `text`, `state`
+(`open`, `answered`, `withdrawn`, `out_of_scope`), `supporting` and
+`contradicting` evidence IDs, `requirements`, and `resolution` (null while
+open). Boundary issues add `source` (the slice record), `key` (the dedup basis),
+and `location` (function, root, SSA variable, call, effective limits, and
+parameters).
+
+The view adds `summary` (state counts, `verified_answers`, `contradicted`),
+`pending`, `evidence` (availability, kind, status, completeness per cited ID),
+`next_queries` (`issue`, `operation`, `argv`, rendered `command`, `reason`,
+`platform_note`), and after an update a `change` object.
+
+Investigations can be imported from elsewhere, so their contents are treated as
+untrusted. A `command` names the binary supplied on the command line, or the
+`FILE` placeholder. `file_hint` is informational and is never read or
+substituted, since an imported hint could name a network path. Every argument
+other than a catalog flag, a decimal number, or a `0x` address is quoted for
+the selected `--shell`. Loading fails with `verification_failed` if a document's
+boundary locations, slice parameters, or requirements are not in the form this
+tool writes. `--handoff` escapes document text, so imported text cannot add
+Markdown sections, links, or suggested commands.
+
+## Function comparisons
+
+`rsleigh.function-comparison/v1` contains `old` and `new` (`file` identity and
+`inventory` with `basis` and `complete`), `profile` (`compatible`, `reasons`),
+`pairs`, `unmatched`, `ambiguous`, `unresolved_requests`, `suggestions`,
+`summary`, and `limits`. Each pair has `old`/`new` function facts (`name`,
+`address`, `body_instructions`, `complete`, `reachability_complete`,
+`diagnostics`), `match` (`explicit` or `unique_symbol`), `verdict`,
+`explanation`, and `dimensions.<name>` = `{result, reason, detail}`.
+Pseudocode details include at most 400 `diff` lines; when the LCS table would
+exceed 2,000,000 cells the diff is replaced by `diff_omitted`. With
+`--evidence`, the comparison binary enters the content ID by SHA-256, not path.
 
 ## P-code and SSA JSON are inspection artifacts
 

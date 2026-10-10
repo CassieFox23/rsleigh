@@ -6,7 +6,7 @@ reproducible.
 
 | Symptom | Likely cause / next step |
 |---|---|
-| `cannot read --help` or `cannot read --version` | Those flags are treated as filenames. Invoke `rsleigh` with no arguments for usage; see [CLI conventions](cli-reference.md#invocation-conventions). |
+| `unknown option --NAME` (`error_code: "unknown_option"`) | A first argument beginning with `-` is an option. Write a file named like an option as `./--NAME`; list operations with `rsleigh --capabilities`. See [CLI conventions](cli-reference.md#invocation-conventions). |
 | Exit status is zero, but there is no useful result | Some failures only print diagnostics, and a brief may contain `error`. Validate the expected artifact using [output checks](output-formats.md). |
 | `jq` fails on a card or index command's stdout | Cards default to text; add `--json`. Index completion messages are text; parse the manifest and its referenced files. |
 | `jq` sees several JSON values instead of one | Multiple functions or output modes were requested. Run one function/mode per command. |

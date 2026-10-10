@@ -68,6 +68,11 @@ rsleigh <binary> --summarise-handlers <addrs>    # IAT-API + stack-pop signature
 rsleigh <binary> --vm-bytecode <bc_va>:<size> --vm-handlers <path.json>  # VM bytecode disasm
 rsleigh <binary> --seh-fixpoint        # SEH-driven SMC patch fixpoint
 rsleigh <binary> --raw <arch>          # raw firmware blob
+rsleigh --capabilities [--json]        # target-free agent operation catalog (+ --help, --version [--json])
+rsleigh <binary> <func> --card --evidence-store S   # content-addressed rsleigh.evidence/v1 record (also brief/slice/compare)
+rsleigh <binary> --export-bundle B --evidence-store S   # then [<binary>] --verify-bundle B / --import-bundle B
+rsleigh <binary> --investigate D --question TEXT        # then [<binary>] --investigation D [--handoff | --expect-revision N --ACTION]
+rsleigh <old> --compare <new> [--pair A:B] --json       # per-dimension function comparison (--diff renders same model)
 ```
 
 ## Layout
@@ -115,6 +120,14 @@ See `docs/decompiler-passes.md` for full pass list. Hotspots:
 - **STACKSTR pointer-write guard:** stack-string merge skips lines starting `*(` — those are global pointer-table writes like `*(uint64_t*)(DAT_00602948) = "gone";`.
 - **Thunk misdetection guard:** "empty body → `return target(); // thunk`" requires (a) zero body lines AND (b) no Call stmt/terminator anywhere AND (c) branch target address NOT in `ssa.blocks`. `Branch(BlockId)` always in-graph — self-loops previously emitted `return func_<self_addr>(); // thunk`.
 - **Deterministic Phi creation:** varnodes sorted `(space, offset, size)` before iteration. HashMap order previously made repeated runs non-deterministic, surfaced as differing ternary arms.
+
+### Agent contracts (`rsleigh-cli/src/cli/agent/`)
+
+- **`contracts.rs` catalog is the only agent flag parser.** New flag/op = catalog entry + docs; `tests/agent_contracts.rs` fails if a flag, schema, or error code is undocumented or an advertised example stops running.
+- Flag `role` decides evidence identity: only `semantic` flags enter `rsleigh.evidence/v1` content IDs (cache/budget/output/evidence flags do not). Canonicalization excludes `INCIDENTAL` payload paths in `evidence.rs`; changing it needs a new canonicalization version.
+- A mode flag reused as another op's modifier (`--investigation` on `--export-bundle`/`--import-bundle`) is dropped from mode candidates in `dispatch`.
+- Investigation revisions: `revisions/NNNNNN.json` (hard-link claim) are authoritative; `investigation.json` is a mirror.
+- `compare.rs` decompiles the reachable body only (whole-window decompile pulls unreachable padding into signature inference); P-code `Unique` offsets encode the instruction address and are renumbered.
 
 ### Signatures + discovery
 
