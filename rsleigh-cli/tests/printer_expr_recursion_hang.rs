@@ -63,10 +63,7 @@ fn printer_does_not_hang_on_crypto_round_dag() {
                     elapsed.as_secs_f64(),
                     status
                 );
-                eprintln!(
-                    "[ok] decompile finished in {:.2}s",
-                    elapsed.as_secs_f64()
-                );
+                eprintln!("[ok] decompile finished in {:.2}s", elapsed.as_secs_f64());
                 return;
             }
             Ok(None) => {

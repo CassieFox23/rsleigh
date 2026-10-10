@@ -58,7 +58,7 @@ fn build_pe_with_truncated_cert_table() -> Vec<u8> {
     let coff = pe_off + 4;
     buf[coff..coff + 2].copy_from_slice(&0x014Cu16.to_le_bytes()); // machine = i386
     buf[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes()); // num sections
-    // TimeDateStamp + symtab fields = 0
+                                                                  // TimeDateStamp + symtab fields = 0
     let opt_size: u16 = 0xE0; // PE32 optional header size
     buf[coff + 16..coff + 18].copy_from_slice(&opt_size.to_le_bytes());
     // Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_32BIT_MACHINE
@@ -68,7 +68,7 @@ fn build_pe_with_truncated_cert_table() -> Vec<u8> {
     let opt = coff + 20;
     buf[opt..opt + 2].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32 magic
     buf[opt + 2] = 14; // major linker version
-    // SizeOfCode = 0x200 (one section, raw size)
+                       // SizeOfCode = 0x200 (one section, raw size)
     buf[opt + 4..opt + 8].copy_from_slice(&0x200u32.to_le_bytes());
     // AddressOfEntryPoint = 0x1000
     buf[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
@@ -113,7 +113,7 @@ fn build_pe_with_truncated_cert_table() -> Vec<u8> {
     buf[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
     buf[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfRawData
     buf[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData
-    // Characteristics = CODE | EXECUTE | READ
+                                                                    // Characteristics = CODE | EXECUTE | READ
     buf[sh + 36..sh + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes());
 
     // -- .text contents at file offset 0x200 --
