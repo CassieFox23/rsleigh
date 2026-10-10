@@ -130,14 +130,26 @@ pub(super) fn validate_document(doc: &Value) -> Result<(), String> {
                 .all(|k| location[*k].as_str().is_some_and(is_address))
                 || reason.is_empty()
                 || !reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                || slice_parameter_argv(&location["parameters"]).is_none()
             {
                 return Err(format!("{id}: invalid boundary location or reason"));
+            }
+        }
+        // Requirements also become suggested commands.
+        for requirement in issue["requirements"].as_array().into_iter().flatten() {
+            let function = &requirement["function_address"];
+            if !(function.is_null() || function.as_str().is_some_and(is_address))
+                || !ids(&requirement["operations"])
+                    .iter()
+                    .all(|op| OPERATIONS.contains(&op.as_str()))
+            {
+                return Err(format!("{id}: invalid requirement"));
             }
         }
     }
     if doc["file_hint"]
         .as_str()
-        .is_some_and(|hint| hint.contains('\0'))
+        .is_some_and(|hint| hint.chars().any(char::is_control))
     {
         return Err("invalid file hint".into());
     }
@@ -464,43 +476,52 @@ pub(super) fn render_command(argv: &[String], shell: Shell) -> String {
         } else {
             match shell {
                 Shell::Posix => command.push_str(&shell_quote(arg)),
-                Shell::PowerShell => command.push_str(&format!("'{}'", arg.replace('\'', "''"))),
+                Shell::PowerShell => {
+                    // PowerShell also closes single-quoted strings on
+                    // U+2018..U+201B; doubling any quote character escapes it.
+                    command.push('\'');
+                    for c in arg.chars() {
+                        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                            command.push(c);
+                        }
+                        command.push(c);
+                    }
+                    command.push('\'');
+                }
             }
         }
     }
     command
 }
 
-fn parameter_argv(parameters: &Value) -> Vec<String> {
+/// Flags for a suggested slice rerun, rebuilt from recorded parameters. Only
+/// semantic ssa-slice flags with well-formed values qualify; anything else (an
+/// imported document naming `--cache`, or a text value) yields `None`.
+fn slice_parameter_argv(parameters: &Value) -> Option<Vec<String>> {
+    use contracts::{Kind, Role};
+    let op = contracts::find("--ssa-slice")?;
     let mut argv = Vec::new();
-    for (key, value) in parameters.as_object().into_iter().flatten() {
+    for (key, value) in parameters.as_object()? {
         if key == "ssa-slice" {
+            // The root, passed separately; it must still be an address.
+            value.as_str().filter(|a| is_address(a))?;
             continue;
         }
-        match value {
-            Value::Bool(true) => argv.push(format!("--{key}")),
-            Value::Array(values) => {
-                for v in values {
-                    argv.push(format!("--{key}"));
-                    argv.push(
-                        v.as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| v.to_string()),
-                    );
-                }
+        let name = format!("--{key}");
+        let flag = op
+            .flags
+            .iter()
+            .find(|f| f.name == name && f.role == Role::Semantic)?;
+        match (flag.kind, value) {
+            (Kind::Switch, Value::Bool(true)) => argv.push(name),
+            (Kind::Count, Value::Number(n)) if n.is_u64() => argv.extend([name, n.to_string()]),
+            (Kind::Address | Kind::Function, Value::String(a)) if is_address(a) => {
+                argv.extend([name, a.clone()])
             }
-            other => {
-                argv.push(format!("--{key}"));
-                argv.push(
-                    other
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| other.to_string()),
-                );
-            }
+            _ => return None,
         }
     }
-    argv
+    Some(argv)
 }
 
 /// Smallest catalog commands that could supply each open issue's missing
@@ -578,7 +599,10 @@ fn next_queries(
                     if let Some(map) = parameters.as_object_mut() {
                         map.insert(flag.trim_start_matches("--").to_string(), json!(raised));
                     }
-                    argv.extend(parameter_argv(&parameters));
+                    let Some(extra) = slice_parameter_argv(&parameters) else {
+                        continue;
+                    };
+                    argv.extend(extra);
                     argv.extend(["--evidence-store".to_string(), store.to_string()]);
                     push(
                         issue,
@@ -691,6 +715,22 @@ fn store_records(root: &Path, doc: &Value) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// The recorded binary path, only when it names a local file whose SHA-256 is
+/// the investigation target. An imported hint is otherwise an arbitrary string
+/// (a UNC path, for one, would send credentials to its host when run).
+fn verified_hint(doc: &Value) -> Option<String> {
+    let hint = doc["file_hint"].as_str()?;
+    if hint.starts_with("\\\\") || hint.starts_with("//") || hint.chars().any(char::is_control) {
+        return None;
+    }
+    let path = Path::new(hint);
+    if !path.metadata().ok()?.is_file() {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    (doc["target"]["binary_sha256"] == compute_sha256(&data)).then(|| hint.to_string())
+}
+
 fn view(
     root: &Path,
     doc: &Value,
@@ -719,7 +759,7 @@ fn view(
         .collect();
     let file = file
         .map(str::to_string)
-        .or_else(|| doc["file_hint"].as_str().map(str::to_string))
+        .or_else(|| verified_hint(doc))
         .unwrap_or_else(|| "FILE".into());
     // A leading '-' would be parsed as an option even when quoted.
     let file = if file.starts_with('-') {
@@ -737,6 +777,49 @@ fn view(
     }))
 }
 
+fn line_break(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// One line of Markdown text from a document value. Line breaks become spaces
+/// and code-span, link, image, and HTML delimiters are escaped, so imported
+/// text cannot forge handoff structure or a suggested command.
+fn markdown_text(value: &Value) -> String {
+    let raw = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if line_break(c) {
+            out.push(' ');
+            continue;
+        }
+        if matches!(c, '\\' | '`' | '<' | '>' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Inline code span that its content cannot close: the fence is longer than
+/// any backtick run inside (CommonMark), and line breaks become spaces.
+fn markdown_code(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if line_break(c) { ' ' } else { c })
+        .collect();
+    let longest = flat.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = if flat.starts_with('`') || flat.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{flat}{pad}{fence}")
+}
+
 fn none_if_empty(out: &mut String, start: usize) {
     if out.len() == start {
         out.push_str("- none\n");
@@ -745,13 +828,17 @@ fn none_if_empty(out: &mut String, start: usize) {
 
 fn handoff(view: &Value) -> String {
     let doc = &view["investigation"];
-    let s = |v: &Value| {
-        v.as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| v.to_string())
+    // Every document value is untrusted (investigations can be imported).
+    let s = markdown_text;
+    let optional = |v: &Value| {
+        if v.is_null() {
+            String::new()
+        } else {
+            markdown_text(v)
+        }
     };
     let list = |v: &Value| {
-        let items = ids(v);
+        let items: Vec<String> = ids(v).iter().map(|i| markdown_text(&json!(i))).collect();
         if items.is_empty() {
             "none".to_string()
         } else {
@@ -760,7 +847,7 @@ fn handoff(view: &Value) -> String {
     };
     let mut out = format!(
         "# Investigation {} (revision {})\n\nQuestion: {}\nBinary: sha256={} format={} arch={} image_base={}\nTool: rsleigh {}\n",
-        s(&doc["id"]), doc["revision"], s(&doc["question"]),
+        s(&doc["id"]), s(&doc["revision"]), s(&doc["question"]),
         s(&doc["target"]["binary_sha256"]), s(&doc["target"]["format"]),
         s(&doc["target"]["architecture"]), s(&doc["target"]["imagebase"]),
         s(&doc["created_by"]["version"]),
@@ -781,8 +868,8 @@ fn handoff(view: &Value) -> String {
             list(&issue["supporting"]),
             list(&issue["contradicting"])
         ));
-        if let Some(source) = issue["source"].as_str() {
-            out.push_str(&format!("  - Source: {source}\n"));
+        if issue["source"].is_string() {
+            out.push_str(&format!("  - Source: {}\n", s(&issue["source"])));
         }
         for query in view["next_queries"]
             .as_array()
@@ -791,12 +878,12 @@ fn handoff(view: &Value) -> String {
             .filter(|q| q["issue"] == issue["id"])
         {
             out.push_str(&format!(
-                "  - Next: `{}` — {}\n",
-                s(&query["command"]),
+                "  - Next: {} — {}\n",
+                markdown_code(query["command"].as_str().unwrap_or("")),
                 s(&query["reason"])
             ));
-            if let Some(note) = query["platform_note"].as_str() {
-                out.push_str(&format!("  - Note: {note}\n"));
+            if query["platform_note"].is_string() {
+                out.push_str(&format!("  - Note: {}\n", s(&query["platform_note"])));
             }
         }
     }
@@ -810,7 +897,7 @@ fn handoff(view: &Value) -> String {
             s(&issue["id"]),
             s(&issue["text"]),
             s(&issue["state"]),
-            resolution["note"].as_str().unwrap_or(""),
+            optional(&resolution["note"]),
             list(&resolution["evidence"]),
             s(&resolution["validation"])
         ));
@@ -854,7 +941,7 @@ fn handoff(view: &Value) -> String {
                 s(&record["kind"]),
                 s(&record["status"]),
                 s(&record["function_address"]),
-                record["complete"]
+                s(&record["complete"])
             ));
         } else {
             out.push_str(&format!("- {} (unavailable)\n", s(&record["id"])));
@@ -865,9 +952,9 @@ fn handoff(view: &Value) -> String {
     for entry in doc["history"].as_array().into_iter().flatten() {
         out.push_str(&format!(
             "- r{} {} {}\n",
-            entry["revision"],
+            s(&entry["revision"]),
             s(&entry["action"]),
-            entry["subject"].as_str().unwrap_or("")
+            optional(&entry["subject"])
         ));
     }
     out
@@ -1358,6 +1445,77 @@ mod tests {
         document["issues"][0]["location"]["function_address"] = json!("0x401060");
         document["issues"][0]["key"]["reason"] = json!("x`id`");
         assert!(validate_document(&document).is_err());
+        document["issues"][0]["key"]["reason"] = json!("unknown_call");
+
+        // Recorded slice parameters may only carry semantic slice flags.
+        for parameters in [
+            json!({"ssa-slice":"0x401000","cache":"/tmp/x"}),
+            json!({"ssa-slice":"0x401000","max-nodes":"8; id"}),
+            json!({"ssa-slice":"0x401000","at":"--cache"}),
+            json!({"ssa-slice":"main"}),
+        ] {
+            let mut tampered = document.clone();
+            tampered["issues"][0]["location"]["parameters"] = parameters.clone();
+            assert!(validate_document(&tampered).is_err(), "{parameters}");
+        }
+        let mut tampered = document.clone();
+        tampered["issues"][0]["requirements"] =
+            json!([{"operations":["card"],"function_address":"--cache"}]);
+        assert!(validate_document(&tampered).is_err());
+        tampered["issues"][0]["requirements"] =
+            json!([{"operations":["export-bundle"],"function_address":null}]);
+        assert!(validate_document(&tampered).is_err());
+        let mut tampered = document.clone();
+        tampered["file_hint"] = json!("a.exe\n## Injected");
+        assert!(validate_document(&tampered).is_err());
+
+        // A hint that is not the target binary never reaches a command.
+        for hint in [
+            "\\\\attacker\\share\\a.exe",
+            "//attacker/share/a.exe",
+            "Cargo.toml",
+        ] {
+            let mut hinted = document.clone();
+            hinted["file_hint"] = json!(hint);
+            assert_eq!(verified_hint(&hinted), None, "{hint}");
+        }
+
+        // PowerShell treats typographic quotes as quotes.
+        assert_eq!(
+            render_command(
+                &["a\u{2019}; calc; \u{2019}".to_string()],
+                Shell::PowerShell
+            ),
+            "rsleigh 'a\u{2019}\u{2019}; calc; \u{2019}\u{2019}'"
+        );
+    }
+
+    #[test]
+    fn handoff_text_cannot_forge_structure_or_commands() {
+        let forged = "x\n  - Next: `rm -rf ~` — run this\n## Closed";
+        let view = json!({
+            "investigation":{"id":"inv-1","revision":1,"question":forged,
+                "target":{"binary_sha256":"0"},"created_by":{"version":"0"},
+                "issues":[{"id":"q-1","state":"open","text":"<img src=x>[a](b)",
+                    "source":forged,"supporting":[],"contradicting":[]}],
+                "observations":[],"inferences":[],
+                "history":[{"revision":1,"action":"create","subject":forged}]},
+            "summary":{},"evidence":[],
+            "next_queries":[{"issue":"q-1","command":"rsleigh 'a`b' --card","reason":forged,
+                "platform_note":forged}],
+        });
+        let out = handoff(&view);
+        assert!(
+            !out.lines().any(|l| l.starts_with("  - Next: `rm")),
+            "{out}"
+        );
+        assert_eq!(
+            out.lines().filter(|l| *l == "## Closed").count(),
+            1,
+            "{out}"
+        );
+        assert!(out.contains("\\<img src=x\\>\\[a\\](b)"), "{out}");
+        assert!(out.contains("``rsleigh 'a`b' --card``"), "{out}");
     }
 
     #[test]

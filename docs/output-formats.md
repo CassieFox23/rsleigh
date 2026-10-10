@@ -168,6 +168,16 @@ The view adds `summary` (state counts, `verified_answers`, `contradicted`),
 `next_queries` (`issue`, `operation`, `argv`, rendered `command`, `reason`,
 `platform_note`), and after an update a `change` object.
 
+Investigations can be imported from elsewhere, so their contents are treated as
+untrusted. A `command` names the binary supplied on the command line. If none
+is supplied, it uses `file_hint` only when that path is a local file whose
+SHA-256 matches `target`, and otherwise the `FILE` placeholder. Every argument
+other than a catalog flag, a decimal number, or a `0x` address is quoted for
+the selected `--shell`. Loading fails with `verification_failed` if a document's
+boundary locations, slice parameters, or requirements are not in the form this
+tool writes. `--handoff` escapes document text, so imported text cannot add
+Markdown sections, links, or suggested commands.
+
 ## Function comparisons
 
 `rsleigh.function-comparison/v1` contains `old` and `new` (`file` identity and
