@@ -517,6 +517,7 @@ mod contracts;
 mod evidence;
 mod index;
 mod investigation;
+mod mcp;
 mod slice;
 
 use contracts::AgentError;
@@ -782,13 +783,13 @@ fn run_operation(
 pub(super) fn dispatch(args: &[String]) -> bool {
     let target_free =
         args.len() > 1 && (args[1].starts_with("--") || matches!(args[1].as_str(), "-h" | "-V"));
-    let selected: Vec<&contracts::Operation> = if target_free {
+    let selected: Vec<&'static contracts::Operation> = if target_free {
         contracts::OPERATIONS
             .iter()
             .filter(|op| op.target != contracts::Target::Binary && op.mode.name == args[1])
             .collect()
     } else {
-        let candidates: Vec<&contracts::Operation> = contracts::OPERATIONS
+        let candidates: Vec<&'static contracts::Operation> = contracts::OPERATIONS
             .iter()
             .filter(|op| op.target != contracts::Target::None)
             .filter(|op| args.iter().skip(2).any(|a| a == op.mode.name))
@@ -808,54 +809,46 @@ pub(super) fn dispatch(args: &[String]) -> bool {
     if selected.is_empty() && !target_free {
         return false;
     }
+    let (code, _) = invoke(selected, args.to_vec(), target_free, false);
+    if code != 0 {
+        std::process::exit(i32::from(code));
+    }
+    true
+}
+
+fn failure_envelope(schema: &str, error: &AgentError) -> Value {
+    json!({"schema":schema, "status":"failed", "error":error.message, "error_code":error.code,
+        "diagnostics":[diagnostic("command", "command_failed", &error.message)]})
+}
+
+/// Run selected operations on a worker thread under the agent contract. With
+/// `collect`, every emitted document (failure envelope included) is returned
+/// instead of printed; otherwise output goes to stdout as for the CLI.
+fn invoke(
+    selected: Vec<&'static contracts::Operation>,
+    args: Vec<String>,
+    target_free: bool,
+    collect: bool,
+) -> (u8, Vec<Value>) {
     let schema = selected
         .first()
         .map(|op| op.schema)
         .unwrap_or(capabilities::SCHEMA);
-    let args = args.to_vec();
     let result = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || -> Result<u8, AgentError> {
-            let Some(op) = selected.first().copied() else {
-                return capabilities::run_target_free(&args);
-            };
-            if selected.len() != 1 {
-                return Err(AgentError::new(
-                    "multiple_modes",
-                    "select exactly one agent mode",
-                ));
+        .spawn(move || -> (Result<u8, AgentError>, Vec<Value>) {
+            if collect {
+                evidence::begin_capture();
             }
-            if args.iter().any(|a| a == "--raw") {
-                return Err(AgentError::new(
-                    "unsupported_input",
-                    "agent modes require PE, ELF, or Mach-O input",
-                ));
-            }
-            contracts::validate(op, &args, if target_free { 1 } else { 2 })?;
-            let data = if target_free {
-                None
+            let result = run_selected(&selected, &args, target_free);
+            let output = if collect {
+                evidence::end_capture()
             } else {
-                Some(std::fs::read(&args[1]).map_err(|e| {
-                    AgentError::new("input_unreadable", format!("cannot read binary: {e}"))
-                })?)
+                Vec::new()
             };
-            let capture = op.flag("--evidence").is_some()
-                && args
-                    .iter()
-                    .any(|a| a == "--evidence" || a == "--evidence-store");
-            if !capture {
-                return run_operation(op, &args, data.as_deref());
-            }
-            let data = data.expect("evidence operations read a binary");
-            evidence::preflight(&args, &data)?;
-            evidence::begin_capture();
-            let result = run_operation(op, &args, Some(&data));
-            let captured = evidence::end_capture();
-            let code = result?;
-            evidence::finish(op, &args, &data, captured, code)?;
-            Ok(code)
+            (result, output)
         });
-    let result = result
+    let (result, mut output) = match result
         .map_err(|e| {
             AgentError::new(
                 "analysis_failed",
@@ -865,24 +858,69 @@ pub(super) fn dispatch(args: &[String]) -> bool {
         .and_then(|t| {
             t.join()
                 .map_err(|_| AgentError::new("analysis_failed", "analysis worker panicked"))
-        })
-        .and_then(|r| r);
-    let code = match result {
-        Ok(code) => code,
-        Err(error) => {
-            emit(
-                &json!({"schema":schema, "status":"failed", "error":error.message,
-                "error_code":error.code,
-                "diagnostics":[diagnostic("command", "command_failed", &error.message)]}),
-            );
-            eprintln!("Error: {error}");
-            1
-        }
+        }) {
+        Ok((result, output)) => (result, output),
+        Err(error) => (Err(error), Vec::new()),
     };
-    if code != 0 {
-        std::process::exit(i32::from(code));
+    match result {
+        Ok(code) => (code, output),
+        Err(error) => {
+            let envelope = failure_envelope(schema, &error);
+            if collect {
+                output.push(envelope);
+            } else {
+                emit(&envelope);
+                eprintln!("Error: {error}");
+            }
+            (1, output)
+        }
     }
-    true
+}
+
+fn run_selected(
+    selected: &[&'static contracts::Operation],
+    args: &[String],
+    target_free: bool,
+) -> Result<u8, AgentError> {
+    let Some(op) = selected.first().copied() else {
+        return capabilities::run_target_free(args);
+    };
+    if selected.len() != 1 {
+        return Err(AgentError::new(
+            "multiple_modes",
+            "select exactly one agent mode",
+        ));
+    }
+    if args.iter().any(|a| a == "--raw") {
+        return Err(AgentError::new(
+            "unsupported_input",
+            "agent modes require PE, ELF, or Mach-O input",
+        ));
+    }
+    contracts::validate(op, args, if target_free { 1 } else { 2 })?;
+    let data =
+        if target_free {
+            None
+        } else {
+            Some(std::fs::read(&args[1]).map_err(|e| {
+                AgentError::new("input_unreadable", format!("cannot read binary: {e}"))
+            })?)
+        };
+    let capture = op.flag("--evidence").is_some()
+        && args
+            .iter()
+            .any(|a| a == "--evidence" || a == "--evidence-store");
+    if !capture {
+        return run_operation(op, args, data.as_deref());
+    }
+    let data = data.expect("evidence operations read a binary");
+    evidence::preflight(args, &data)?;
+    evidence::begin_capture();
+    let result = run_operation(op, args, Some(&data));
+    let captured = evidence::end_capture();
+    let code = result?;
+    evidence::finish(op, args, &data, captured, code)?;
+    Ok(code)
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 # Plan: adapt REA's investigation workflows to rsleigh
 
 Date: 2026-10-09. Status: deliverables 1–4 implemented (see
-[implementation status](#implementation-status)); the optional MCP/REA
-integration remains unstarted.
+[implementation status](#implementation-status)). For the optional
+integration, an MCP server is in place; the REA provider would need changes to
+REA's own operation contract and has not been started.
 
 Reviewed rsleigh at `16d3d0cb73b62fc41713fb6250c6c862fe63e2e4` and
 [REA at `bf934d5592e707ba5e7769043de3a430ed8d4923`](https://github.com/morluto/rea/tree/bf934d5592e707ba5e7769043de3a430ed8d4923).
@@ -30,6 +31,7 @@ an REA integration can be an optional consumer. See REA's
 | 2. Portable evidence bundles | `cli/agent/evidence.rs` (`rsleigh.evidence/v1`, canonical projection v1, store), `cli/agent/bundle.rs` (export/verify/import over `index::publish` and the extracted generation reader) | `tests/agent_evidence.rs`: stable IDs warm/cold/moved, round-trip partial records, corrupt/forged/mixed/undeclared rejection, links |
 | 3. Questions, unknowns, handoff | `cli/agent/investigation.rs` (revisions, deduplicated boundary issues, evidence-checked answers, next queries, Markdown handoff, bundle attachment) | `tests/agent_investigation.rs`: reopen without binary, stale revisions, unavailable evidence, indirect-call unknown and contradictions survive handoff |
 | 4. Structured function comparison | `cli/agent/compare.rs` (`--compare`, legacy `--diff` renderer) | `tests/agent_compare.rs` with [seed variants](../test-harness/fixtures/agent-re/variants.rs): relocation, constant/callee changes, duplicates, renamed, failed, truncated, incompatible profile |
+| Optional integration: MCP | `cli/agent/mcp.rs` (`rsleigh --mcp`): stdio JSON-RPC, tool schemas generated from the catalog, calls through the CLI's `invoke` path; starts with discovery, brief, card, slice, and bundle verification as proposed | `tests/agent_mcp.rs`: stdout is protocol-only; brief and slice documents, evidence content IDs, and failure codes match the CLI |
 | Validation throughout | `agent_re_eval --workflows` (seven tasks) in CI | [Workflow tasks](agent-re-evaluation.md#workflow-tasks): 7/7, 0 lost references, 0 incorrect upgrades |
 
 Deviations from the proposal: comparison recomputes facts per run instead of
@@ -37,7 +39,11 @@ using `--analysis-cache` (whole-window card analysis includes unreachable
 padding, which skewed pseudocode); a verification without the source binary
 reports `partial` (exit 2) because only integrity was checked; investigation
 evidence cites use `--cite` because `--evidence` already selects evidence
-capture on other operations.
+capture on other operations. The integration step chose MCP without a
+comparative spike. A REA provider needs changes to REA's own operation set, so
+MCP was the only route that could be delivered within this repository.
+Cancellation is not implemented because calls run one at a time; `deadline-ms`
+bounds a call instead.
 
 ## What we already have
 

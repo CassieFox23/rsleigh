@@ -87,6 +87,40 @@ and add a stable `error_code`:
 Codes are stable; messages may change. Exit statuses are unchanged: 0 complete,
 2 partial evidence, 1 failed.
 
+## Serve operations over MCP
+
+```bash
+rsleigh --mcp        # Model Context Protocol server: JSON-RPC 2.0 on stdin/stdout
+```
+
+The server exposes the operations an agent needs first: `capabilities`,
+`agent-brief`, `card`, `ssa-slice`, and `verify-bundle`. Each tool's input
+schema is generated from the same catalog as the CLI:
+
+- `file` is the binary.
+- `function` is the card target.
+- The mode value uses the flag name (`ssa-slice`, `verify-bundle`).
+- Each other flag becomes a property named after it without its dashes, such as
+  `max-nodes` or `evidence-store`. Switches are booleans, counts are integers,
+  and repeatable flags are arrays.
+
+Output is always JSON. A tool result is the CLI's JSON document, delivered both
+as `structuredContent` and as JSON text. `isError` is true exactly when the CLI
+would exit 1. A partial result is not an error; check its `status`. Failures
+carry the same `error_code` values as the CLI, and evidence records get the
+same content IDs.
+
+The server writes only protocol messages to stdout and diagnostics to stderr.
+It handles one call at a time, so a cancellation notice arrives after its call
+has finished and is ignored; bound work with `deadline-ms` instead.
+
+Supported protocol revisions are 2025-11-25, 2025-06-18, 2025-03-26, and
+2024-11-05. To register the server with an MCP client:
+
+```json
+{"mcpServers": {"rsleigh": {"command": "rsleigh", "args": ["--mcp"]}}}
+```
+
 ## Map and select functions
 
 These analysis modes operate on parsed PE, ELF, and Mach-O binaries.

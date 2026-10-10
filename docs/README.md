@@ -27,6 +27,7 @@ links for details instead of loading all documentation into every model turn.
 | How do I reuse analysis and bound execution work? | [Analysis cache](agent-workflow.md#reuse-analysis) · [Work limits](agent-workflow.md#limit-execution-work) |
 | Which operations, flags, and per-architecture queries does this build support? | `rsleigh --capabilities --json` · [Discovery](cli-reference.md#discover-supported-operations) |
 | Which command and flags answer this question? | [CLI command guide](cli-reference.md) |
+| How do I use rsleigh from an MCP client? | `rsleigh --mcp` · [MCP server](cli-reference.md#serve-operations-over-mcp) |
 | How do I hand off evidence and open questions to another session? | [Portable evidence](agent-workflow.md#portable-evidence) · [Investigations](agent-workflow.md#track-questions-across-sessions) |
 | What changed between two builds of a function? | [Function comparison](cli-reference.md#compare-two-builds) |
 | Is this output JSON, NDJSON, or text? How do I detect failure? | [Output formats](output-formats.md) |
