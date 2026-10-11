@@ -280,7 +280,9 @@ fn build_ssa_with_return_register(
 
                     // For each Unique varnode written in both then and else paths,
                     // create a Ternary expression
-                    for (vn, then_var) in &then_state {
+                    let mut then_entries: Vec<(&Varnode, &VarId)> = then_state.iter().collect();
+                    then_entries.sort_by_key(|(vn, _)| (vn.space, vn.offset, vn.size));
+                    for (vn, then_var) in then_entries {
                         if let Some(&else_var) = current.get(vn) {
                             if else_var != *then_var {
                                 let ternary_expr = Expr::Ternary(cond_var, *then_var, else_var);
@@ -771,22 +773,30 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
     // Case 2: Reading larger (RDX) when smaller (EDX) was written → zero-extend
     //   Common on x86-64 where 32-bit ops implicitly zero-extend to 64-bit.
     if vn.space == AddressSpaceId::Register {
-        for (&existing_vn, &existing_var) in current.iter() {
-            if existing_vn.space == AddressSpaceId::Register
-                && existing_vn.offset == vn.offset
-                && existing_vn.size != vn.size
-            {
-                if existing_vn.size > vn.size {
-                    // Case 1: read smaller from larger — reuse directly
-                    return existing_var;
-                } else {
-                    // Case 2: read larger from smaller — zero-extend
-                    let expr = Expr::UnaryOp(UnaryOpKind::Zext, existing_var);
-                    let var_id = ssa.new_var(*vn, expr, vn.size);
-                    ssa.vars[var_id.0 as usize].origins.synthetic = true;
-                    current.insert(*vn, var_id);
-                    return var_id;
-                }
+        let same_register = current.iter().filter(|(existing_vn, _)| {
+            existing_vn.space == AddressSpaceId::Register && existing_vn.offset == vn.offset
+        });
+        let alias = same_register
+            .clone()
+            .filter(|(existing_vn, _)| existing_vn.size > vn.size)
+            .min_by_key(|(existing_vn, _)| existing_vn.size)
+            .or_else(|| {
+                same_register
+                    .filter(|(existing_vn, _)| existing_vn.size < vn.size)
+                    .max_by_key(|(existing_vn, _)| existing_vn.size)
+            })
+            .map(|(existing_vn, existing_var)| (*existing_vn, *existing_var));
+        if let Some((existing_vn, existing_var)) = alias {
+            if existing_vn.size > vn.size {
+                // Case 1: read smaller from larger — reuse directly
+                return existing_var;
+            } else {
+                // Case 2: read larger from smaller — zero-extend
+                let expr = Expr::UnaryOp(UnaryOpKind::Zext, existing_var);
+                let var_id = ssa.new_var(*vn, expr, vn.size);
+                ssa.vars[var_id.0 as usize].origins.synthetic = true;
+                current.insert(*vn, var_id);
+                return var_id;
             }
         }
     }
