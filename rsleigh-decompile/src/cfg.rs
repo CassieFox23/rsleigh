@@ -295,16 +295,24 @@ pub fn build_cfg_with_memory(
                         && matches!(dest_vn.offset, 88 | 240);
                     let table = tables
                         .get(&last_inst_addr)
-                        .filter(|t| t.targets.iter().all(|a| leader_to_block.contains_key(a)));
+                        .filter(|t| t.targets.iter().all(|a| leader_to_block.contains_key(a)))
+                        .filter(|t| {
+                            t.copy_before
+                                .is_none_or(|at| ops.iter().any(|(a, _)| *a == at))
+                        });
                     if let Some(table) = table {
                         let cases: Vec<BlockId> =
                             table.targets.iter().map(|a| leader_to_block[a]).collect();
+                        let index = match table.copy_before {
+                            Some(at) => copy_aside(&mut ops, last_inst_addr, at, table.index),
+                            None => table.index,
+                        };
                         switch_chain(
                             &mut ops,
                             &mut synthetic,
                             first_synthetic,
                             last_inst_addr,
-                            table.index,
+                            index,
                             &cases,
                         )
                     } else if is_stack_return || is_bx_lr {
@@ -442,6 +450,27 @@ pub fn build_cfg_with_memory(
     }
 }
 
+/// Temporary name for the case tests of the jump at `at`; `k` is the case
+/// number, or `u16::MAX` for the copied index.
+fn switch_temp(at: u64, k: usize, size: u32) -> Varnode {
+    Varnode {
+        space: AddressSpaceId::Unique,
+        offset: (3 << 61) | (at << 16) | k as u64,
+        size,
+    }
+}
+
+/// Copy `index` into a temporary just before the op group of the
+/// instruction at `before`, where the table load has not yet overwritten it.
+/// The copy is tagged with the jump's address, so the instruction's own op
+/// indices stay put.
+fn copy_aside(ops: &mut Vec<(u64, PcodeOp)>, jump: u64, before: u64, index: Varnode) -> Varnode {
+    let out = switch_temp(jump, u16::MAX as usize, index.size);
+    let at = ops.iter().position(|(a, _)| *a == before).unwrap_or(0);
+    ops.insert(at, (jump, PcodeOp::Copy { out, input: index }));
+    out
+}
+
 /// Dispatch on a recovered jump table as a chain of `index == k` tests:
 /// the jump's block tests case 0, synthetic blocks test the rest, and the
 /// last case is the remaining edge (the bounds check already ran). The
@@ -461,11 +490,7 @@ fn switch_chain(
         return Terminator::Branch(last);
     }
     let test = |k: usize| {
-        let cond = Varnode {
-            space: AddressSpaceId::Unique,
-            offset: (3 << 61) | (at << 10) | k as u64,
-            size: 1,
-        };
+        let cond = switch_temp(at, k, 1);
         let op = PcodeOp::IntEq {
             out: cond,
             left: index,

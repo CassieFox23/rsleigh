@@ -8,6 +8,9 @@
 //! The entry count comes from the bounds check before the dispatch
 //! (`CMP idx, N` then `JA`/`JAE`); without one, entries are read while they
 //! name decoded instructions. Every target must be a decoded instruction.
+//!
+//! The table base is traced through up to `WINDOW` earlier instructions,
+//! since compilers hoist its `lea` out of the switch.
 
 use pcode_ir::{AddressSpaceId, Instruction, PcodeOp, Varnode};
 use std::collections::HashSet;
@@ -24,16 +27,28 @@ pub struct JumpTable {
     /// register itself, or the register it was copied or extended from when
     /// the scaled one is overwritten by the table load.
     pub index: Varnode,
+    /// When no such varnode exists, the address of the instruction that
+    /// scales `index` and overwrites it: the caller copies `index` into a
+    /// temporary just before that instruction and tests the temporary.
+    pub copy_before: Option<u64>,
     /// Case targets in table order: entry `k` is taken when the index is `k`.
     pub targets: Vec<u64>,
 }
 
+/// Entries read from a table with no bounds check.
 const MAX_ENTRIES: usize = 256;
-const WINDOW: usize = 12;
+/// Largest table a bounds check may declare. Every entry must still name a
+/// decoded instruction and lie inside the image, so a wrong count fails; this
+/// caps the `idx == k` chain built from a right one.
+const MAX_GUARDED_ENTRIES: usize = 4096;
+/// Contiguous instructions before the jump whose ops are searched.
+const WINDOW: usize = 512;
 
 /// One operation of the dispatch window.
 struct Op<'a> {
     op: &'a PcodeOp,
+    /// Address of the instruction the op belongs to.
+    address: u64,
 }
 
 enum Entries {
@@ -63,23 +78,33 @@ pub fn find(instructions: &[(u64, Instruction)], memory: Memory) -> Vec<JumpTabl
         }
         let window: Vec<Op> = sorted[first..=i]
             .iter()
-            .flat_map(|(_, inst)| inst.ops.iter().map(|op| Op { op }))
+            .flat_map(|(address, inst)| {
+                inst.ops.iter().map(|op| Op {
+                    op,
+                    address: *address,
+                })
+            })
             .collect();
         let end = window.len() - 1;
         let Some((table, entries, index_pos, index)) = dispatch(&window, end, *dest) else {
             continue;
         };
-        let Some(index) = stable_index(&window, index_pos, index) else {
+        let Some((index, copy_before)) = stable_index(&window, index_pos, index, *address) else {
             continue;
         };
-        let bound = guard_count(&sorted[i.saturating_sub(16)..i]);
+        let bound = guard_count(&sorted[i.saturating_sub(16)..i])
+            .filter(|count| *count <= MAX_GUARDED_ENTRIES);
         let width = match entries {
             Entries::Relative => 4,
             Entries::Absolute(w) => w,
         };
         let mut targets = Vec::new();
-        for k in 0..bound.unwrap_or(MAX_ENTRIES).min(MAX_ENTRIES) {
+        for k in 0..bound.unwrap_or(MAX_ENTRIES) {
             let Some(bytes) = memory(table + (k * width) as u64, width) else {
+                // A declared table that runs off the image is not a table.
+                if bound.is_some() {
+                    targets.clear();
+                }
                 break;
             };
             let raw = bytes
@@ -104,6 +129,7 @@ pub fn find(instructions: &[(u64, Instruction)], memory: Memory) -> Vec<JumpTabl
         found.push(JumpTable {
             jump: *address,
             index,
+            copy_before,
             targets,
         });
     }
@@ -112,26 +138,45 @@ pub fn find(instructions: &[(u64, Instruction)], memory: Memory) -> Vec<JumpTabl
 
 /// A varnode holding the value `vn` has at `pos` that no later op in the
 /// window overwrites, following copies and extensions back to their source.
-fn stable_index(window: &[Op], mut pos: usize, mut vn: Varnode) -> Option<Varnode> {
+/// When none exists (`add eax, 0x83` built the index and the table load
+/// overwrites it), the value itself with the address of the instruction
+/// that reads it: the caller copies it aside just before that instruction.
+fn stable_index(
+    window: &[Op],
+    start: usize,
+    start_vn: Varnode,
+    jump: u64,
+) -> Option<(Varnode, Option<u64>)> {
+    let (mut pos, mut vn) = (start, start_vn);
     for _ in 0..6 {
-        let overwritten = window[pos..].iter().any(|o| {
-            pcode_ir::get_output(o.op)
-                .is_some_and(|out| out.space == vn.space && out.offset == vn.offset)
-        });
+        let overwritten = window[pos..].iter().any(|o| writes(o.op, vn));
         // Unique temporaries are per instruction, so one that is never
         // rewritten (the value a global index was loaded into) is stable too.
         if !overwritten && vn.space != AddressSpaceId::Const {
-            return Some(vn);
+            return Some((vn, None));
         }
-        let d = def(window, pos, vn)?;
+        let Some(d) = def(window, pos, vn) else { break };
         match window[d].op {
             PcodeOp::Copy { input, .. }
             | PcodeOp::IntZext { input, .. }
             | PcodeOp::Subpiece { input, lsb: 0, .. } => (vn, pos) = (*input, d),
-            _ => return None,
+            _ => break,
         }
     }
-    None
+    // The copy goes in front of the reading instruction, so none of its
+    // earlier ops may have changed the value. The caller checks that the
+    // instruction is in the jump's block.
+    let at = window[start].address;
+    let changed_first = window[..start]
+        .iter()
+        .any(|o| o.address == at && writes(o.op, start_vn));
+    (start_vn.space == AddressSpaceId::Register && at != jump && !changed_first)
+        .then_some((start_vn, Some(at)))
+}
+
+/// True when `op` writes `vn`.
+fn writes(op: &PcodeOp, vn: Varnode) -> bool {
+    pcode_ir::get_output(op).is_some_and(|out| out.space == vn.space && out.offset == vn.offset)
 }
 
 /// Index of the last op before `end` that writes `vn`.
@@ -294,9 +339,7 @@ fn guard_count(before: &[&(u64, Instruction)]) -> Option<usize> {
                 None => imm.parse().ok()?,
             };
             let count = if inclusive? { n + 1 } else { n };
-            return usize::try_from(count)
-                .ok()
-                .filter(|c| (1..=MAX_ENTRIES).contains(c));
+            return usize::try_from(count).ok().filter(|c| *c >= 1);
         }
     }
     None
