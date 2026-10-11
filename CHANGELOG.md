@@ -55,7 +55,8 @@ All notable user-facing changes to rsleigh are documented here.
   records differ from earlier builds; existing records still verify.
 - `--xrefs` and `--search` are catalog operations, also served over MCP. They
   print text as before; `--json` emits `rsleigh.xrefs/v1` (callers with call
-  site counts) and `rsleigh.search/v1`. Unknown flags are now rejected with
+  site and tail-call counts) and `rsleigh.search/v1`. `--xrefs` counts a
+  direct jump to the function or its import stub as a tail-call site. Unknown flags are now rejected with
   `unsupported_option`. A function longer than the 4,096-byte scan window makes
   the result `partial` (exit 2) and is counted in `limits.truncated_scans`.
   `--raw` input keeps the raw-image output. The agent brief's suggested xrefs
@@ -76,6 +77,13 @@ All notable user-facing changes to rsleigh are documented here.
   addresses inside a function's FDE as functions.
 - Card and slice failures report a stable `error_code` (`execution_limit`,
   `analysis_failed`, `invalid_selector`).
+- Jump tables whose base is set far before the dispatch, that declare more
+  than 256 entries, or whose index the table load overwrites are recovered
+  (both `ls` tables from #7; #14, thanks @CassieFox23).
+- Constant folding no longer overflows the stack on a value that defines
+  itself, which aborted `--search` and decompiles on Fedora's libsqlite3.
+- Calls and jumps through a pointer stored in data print as
+  `(*DAT_<slot>)(...)` instead of naming the slot as a function.
 - `--xrefs` no longer prints decoder panics on input that ends mid-instruction,
   no longer reports internal temporaries as callees (`func_c3b500000`), and
   counts calls through PLT and `.plt.got` stubs as callers.
