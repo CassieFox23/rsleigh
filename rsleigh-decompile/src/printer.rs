@@ -8535,8 +8535,16 @@ fn post_process(
 
         // Rename fields for known/inferred structs
         if !field_names.is_empty() {
+            let mut rename_order: Vec<_> = field_names.iter().collect();
+            rename_order.sort_by(|((a_base, a_off), _), ((b_base, b_off), _)| {
+                b_base
+                    .len()
+                    .cmp(&a_base.len())
+                    .then_with(|| a_base.cmp(b_base))
+                    .then_with(|| a_off.cmp(b_off))
+            });
             for line in &mut lines {
-                for ((base, offset), (fname, _ftype)) in &field_names {
+                for ((base, offset), (fname, _ftype)) in rename_order.iter().copied() {
                     // Pattern 1: base->field_XX → base->fieldName
                     let old = format!("{}->field_{:x}", base, offset);
                     if line.contains(&old) {
