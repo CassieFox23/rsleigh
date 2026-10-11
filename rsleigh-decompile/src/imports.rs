@@ -426,6 +426,11 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
                     let clean = demangle_name(name);
+                    // `.plt.got` stubs jump through these slots: a function
+                    // whose address is also taken binds here, not in .rela.plt.
+                    got_to_name
+                        .entry(reloc.r_offset)
+                        .or_insert_with(|| clean.clone());
                     map.entry(reloc.r_offset).or_insert(clean);
                 }
             }
@@ -572,8 +577,9 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
             let n_entries = sh.sh_size / entry_size;
             let file_off = sh.sh_offset as usize;
 
-            // Skip the first entry (PLT[0] is the resolver stub)
-            for i in 1..n_entries.min(10000) {
+            // PLT[0] is the resolver stub; .plt.got and .plt.sec have none.
+            let first = if name == ".plt" { 1 } else { 0 };
+            for i in first..n_entries.min(10000) {
                 // cap at 10K entries for safety
                 let Some(stub_addr) =
                     plt_start.checked_add(i.checked_mul(entry_size).unwrap_or(u64::MAX))

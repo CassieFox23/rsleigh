@@ -82,6 +82,10 @@ impl Architecture {
     }
 }
 
+/// Bytes a single decode may read: past the 15-byte x86 limit plus the
+/// widest token, so padded input never reaches a slice end.
+const DECODE_WINDOW: usize = 32;
+
 /// Unified instruction decoder.
 ///
 /// Manages the per-architecture context memory and global set. Create one
@@ -222,6 +226,23 @@ impl Decoder {
         bytes: &[u8],
         addr: u64,
     ) -> Result<Instruction, DecodeError> {
+        // Generated token readers slice their bytes without a length check,
+        // so input that ends mid-instruction would panic inside the matcher.
+        // Decode short input from a zero-padded copy and reject any match
+        // that needs bytes the caller did not supply.
+        if bytes.len() < DECODE_WINDOW {
+            let mut padded = [0u8; DECODE_WINDOW];
+            padded[..bytes.len()].copy_from_slice(bytes);
+            let instruction = self.decode_from(&padded, addr)?;
+            if instruction.len > bytes.len() as u64 {
+                return Err(DecodeError::UnknownInstruction);
+            }
+            return Ok(instruction);
+        }
+        self.decode_from(bytes, addr)
+    }
+
+    fn decode_from(&mut self, bytes: &[u8], addr: u64) -> Result<Instruction, DecodeError> {
         // Each instruction gets a fresh copy of context. SLEIGH context changes
         // during pattern matching (e.g. REX prefix bits) are local to each
         // instruction and must not leak to the next decode call. Only globalset
@@ -379,6 +400,21 @@ mod tests {
             }));
             let span = inst.constructor.expect("generated constructor provenance");
             assert!(span.source.contains("slaspec/x86/"), "{}", span.source);
+        });
+    }
+
+    #[test]
+    fn truncated_input_is_an_error_not_a_panic() {
+        with_decoder_stack(|| {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            // MOV R12D,[RSP+0x88] cut short at every length, and empty input.
+            let full = [0x44, 0x8b, 0xa4, 0x24, 0x88, 0x00, 0x00, 0x00];
+            for n in 0..full.len() {
+                assert!(dec.decode(&full[..n], 0x1000).is_err(), "{n} bytes");
+            }
+            assert_eq!(dec.decode(&full, 0x1000).unwrap().len, 8);
+            // A one-byte instruction still decodes from one byte.
+            assert_eq!(dec.decode(&[0xc3], 0x1000).unwrap().len, 1);
         });
     }
 

@@ -61,6 +61,19 @@ fn direct_jump_out_of_the_body_is_a_tail_call() {
 }
 
 #[test]
+fn jump_through_a_loaded_pointer_calls_through_it() {
+    // mov rdx, [rdi] ; jmp qword ptr [rdx + 0x28]
+    // The pointer is read at a computed address. Its unique-space offset
+    // must not be printed as a direct call target (morluto/rea#1389).
+    static BYTES: [u8; 6] = [0x48, 0x8b, 0x17, 0xff, 0x62, 0x28];
+    for text in decompile_x64(&BYTES, 0x1000) {
+        let body = text.split_once('{').map_or("", |(_, b)| b);
+        assert!(!body.contains("func_"), "{text}");
+        assert!(body.contains("(*"), "{text}");
+    }
+}
+
+#[test]
 fn shared_return_keeps_each_path_value() {
     //   cmp edi, 1 ; jle L2
     //   mov eax, 1 ; jmp L3

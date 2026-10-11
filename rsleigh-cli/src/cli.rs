@@ -4282,49 +4282,15 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
     let mut strings_in_target = Vec::new();
     let mut target_output = String::new();
     {
-        let off = segs.iter().find_map(|(va, sz, fo)| {
-            if target_addr >= *va && target_addr < va + sz {
-                Some(fo + (target_addr - va))
-            } else {
-                None
-            }
-        });
-        if let Some(off) = off {
-            let max = 8192.min(data.len().saturating_sub(off as usize));
-            let bytes = &data[off as usize..off as usize + max];
-            let next_func = symbols
-                .iter()
-                .filter(|(a, _)| *a > target_addr)
-                .map(|(a, _)| *a)
-                .min()
-                .unwrap_or(target_addr + max as u64);
-            let decode_max = ((next_func - target_addr) as usize).min(max);
-            let mut insts = Vec::new();
-            let mut pos = 0;
-            while pos < decode_max {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    dec.decode(&bytes[pos..], target_addr + pos as u64)
-                })) {
-                    Ok(Ok(inst)) => {
-                        let l = inst.len as usize;
-                        if l == 0 {
-                            pos += 1;
-                            continue;
-                        }
-                        insts.push((target_addr + pos as u64, inst));
-                        pos += l;
-                    }
-                    _ => {
-                        pos += 1;
-                    }
-                }
-            }
-            if !insts.is_empty() {
-                target_output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
-                }))
-                .unwrap_or_default();
-            }
+        // Same decode as card/decompile: FDE extent, stop at the first
+        // undecodable byte. Skipping a byte on failure walked into the
+        // following data and decoded garbage.
+        let insts = decode_func(target_addr, &symbols, &segs, data, &mut dec);
+        if !insts.is_empty() {
+            target_output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+            }))
+            .unwrap_or_default();
         }
         // Extract callees and strings from decompiled output
         for line in target_output.lines() {
@@ -4363,6 +4329,15 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
     }
 
     // Phase 2: Scan ALL functions to find callers (functions that call target)
+    // Calls to an exported function usually go through its PLT stub, so a
+    // call to a stub that imports the target's name is a call to the target.
+    let call_targets: std::collections::HashSet<u64> =
+        rsleigh_decompile::imports::resolve_imports(data)
+            .into_iter()
+            .filter(|(_, name)| name == target_display)
+            .map(|(addr, _)| addr)
+            .chain([target_addr])
+            .collect();
     let mut callers = Vec::new();
     for (func_addr, func_name) in &symbols {
         if *func_addr == target_addr {
@@ -4411,7 +4386,7 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
                         if let Some(target_str) = dis.split_whitespace().nth(1) {
                             if let Some(hex) = target_str.strip_prefix("0x") {
                                 if let Ok(addr) = u64::from_str_radix(hex, 16) {
-                                    if addr == target_addr {
+                                    if call_targets.contains(&addr) {
                                         callers.push((func_addr.clone(), func_name.clone()));
                                     }
                                 }
