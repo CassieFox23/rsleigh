@@ -17932,6 +17932,11 @@ fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> Str
             if let Some(name) = ctx.imports.get(addr) {
                 return name.clone();
             }
+            // `call [slot]` / `jmp [slot]` through a pointer stored in data:
+            // the slot is not a function.
+            if ctx.binary.is_some_and(|b| is_data_address(*addr, b)) {
+                return format!("(*DAT_{:08x})", addr);
+            }
             format!("func_{:x}", addr)
         }
         CallTarget::Indirect(vn) => {
@@ -18849,6 +18854,34 @@ fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
         Some(s)
     } else {
         None
+    }
+}
+
+/// True when `va` lies in a mapped section that is not executable.
+fn is_data_address(va: u64, binary: &[u8]) -> bool {
+    use goblin::elf::section_header::{SHF_ALLOC, SHF_EXECINSTR};
+    const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+    const VM_PROT_EXECUTE: u32 = 0x4;
+    match goblin::Object::parse(binary) {
+        Ok(goblin::Object::Elf(elf)) => elf.section_headers.iter().any(|sh| {
+            sh.sh_addr != 0
+                && va >= sh.sh_addr
+                && va < sh.sh_addr + sh.sh_size
+                && sh.sh_flags & u64::from(SHF_ALLOC) != 0
+                && sh.sh_flags & u64::from(SHF_EXECINSTR) == 0
+        }),
+        Ok(goblin::Object::PE(pe)) => va.checked_sub(pe.image_base as u64).is_some_and(|rva| {
+            pe.sections.iter().any(|s| {
+                let start = u64::from(s.virtual_address);
+                rva >= start
+                    && rva < start + u64::from(s.virtual_size)
+                    && s.characteristics & IMAGE_SCN_MEM_EXECUTE == 0
+            })
+        }),
+        Ok(goblin::Object::Mach(goblin::mach::Mach::Binary(m))) => m.segments.iter().any(|seg| {
+            va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize && seg.initprot & VM_PROT_EXECUTE == 0
+        }),
+        _ => false,
     }
 }
 

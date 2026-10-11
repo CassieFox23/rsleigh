@@ -73,6 +73,67 @@ fn jump_through_a_loaded_pointer_calls_through_it() {
     }
 }
 
+/// A minimal ELF: `.text` at 0x1000 holding `code`, and a writable `.data`
+/// at 0x3000 of 16 zero bytes. No symbols or relocations.
+fn elf_with_data_slots(code: &[u8]) -> Vec<u8> {
+    let shstrtab = b"\0.text\0.data\0.shstrtab\0";
+    let (text_off, data_off, sh_off) = (0x80u64, 0xa0u64, 0xc0u64);
+    let mut elf = vec![0u8; sh_off as usize];
+    elf[..16].copy_from_slice(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0");
+    elf[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    elf[18..20].copy_from_slice(&0x3eu16.to_le_bytes()); // x86-64
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    elf[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
+    elf[40..48].copy_from_slice(&sh_off.to_le_bytes());
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf[60..62].copy_from_slice(&4u16.to_le_bytes()); // e_shnum
+    elf[62..64].copy_from_slice(&3u16.to_le_bytes()); // e_shstrndx
+    elf[0x40..0x40 + shstrtab.len()].copy_from_slice(shstrtab);
+    elf[text_off as usize..text_off as usize + code.len()].copy_from_slice(code);
+    // (name, type, flags, addr, offset, size)
+    let sections: [(u32, u32, u64, u64, u64, u64); 4] = [
+        (0, 0, 0, 0, 0, 0),
+        (1, 1, 0x6, 0x1000, text_off, code.len() as u64), // AX
+        (7, 1, 0x3, 0x3000, data_off, 16),                // WA
+        (13, 3, 0, 0, 0x40, shstrtab.len() as u64),
+    ];
+    for (name, kind, flags, addr, offset, size) in sections {
+        elf.extend_from_slice(&name.to_le_bytes());
+        elf.extend_from_slice(&kind.to_le_bytes());
+        for field in [flags, addr, offset, size] {
+            elf.extend_from_slice(&field.to_le_bytes());
+        }
+        elf.extend_from_slice(&[0; 8]); // link, info
+        elf.extend_from_slice(&1u64.to_le_bytes()); // addralign
+        elf.extend_from_slice(&0u64.to_le_bytes()); // entsize
+    }
+    elf
+}
+
+#[test]
+fn calls_through_data_slots_call_through_the_pointer() {
+    // call qword ptr [0x3000] ; jmp qword ptr [0x3008]
+    // Both slots are in writable .data and are not imports: the targets are
+    // pointers stored there, not functions at 0x3000 and 0x3008 (rsleigh#17).
+    static CODE: [u8; 12] = [
+        0xff, 0x15, 0xfa, 0x1f, 0x00, 0x00, 0xff, 0x25, 0xfc, 0x1f, 0x00, 0x00,
+    ];
+    let elf = elf_with_data_slots(&CODE);
+    let text = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let insts = decode_x64(&CODE, 0x1000);
+            rsleigh_decompile::decompile_with_binary(Architecture::X86_64, &insts, Some(&elf), None)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(!text.contains("func_300"), "{text}");
+    assert!(text.contains("(*DAT_00003000)("), "{text}");
+    assert!(text.contains("(*DAT_00003008)("), "{text}");
+}
+
 #[test]
 fn shared_return_keeps_each_path_value() {
     //   cmp edi, 1 ; jle L2
