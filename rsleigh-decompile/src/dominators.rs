@@ -78,39 +78,50 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
         return vec![];
     }
 
-    // Find exit blocks
-    let exits: Vec<usize> = cfg
-        .blocks
-        .iter()
-        .filter(|b| matches!(b.terminator, Terminator::Return))
-        .map(|b| b.id.0)
+    // Every block without successors (returns, unresolved indirect jumps,
+    // calls that do not come back) flows into one virtual exit, node `n`.
+    // A block whose paths end at different exits has no merge point and
+    // post-dominates to `n`, which is out of range for callers ("no
+    // merge"). Using one real return as the exit instead made unrelated
+    // (even unreachable) returns look like merge points.
+    let exit_node = n;
+    let succs: Vec<Vec<usize>> = (0..n)
+        .map(|b| {
+            let s: Vec<usize> = cfg
+                .successors(BlockId(b))
+                .into_iter()
+                .map(|s| s.0)
+                .filter(|&s| s < n)
+                .collect();
+            if s.is_empty() {
+                vec![exit_node]
+            } else {
+                s
+            }
+        })
         .collect();
 
-    let exit_node = exits.first().copied().unwrap_or(n - 1);
-
     // Build reverse predecessors (forward successors become reverse predecessors)
-    let mut rev_preds = vec![vec![]; n];
-    for block in &cfg.blocks {
-        for succ in cfg.successors(block.id) {
-            if succ.0 < n {
-                rev_preds[succ.0].push(block.id.0);
-            }
+    let mut rev_preds = vec![vec![]; n + 1];
+    for (b, ss) in succs.iter().enumerate() {
+        for &s in ss {
+            rev_preds[s].push(b);
         }
     }
 
     // Reverse postorder on reverse graph
-    let mut visited = vec![false; n];
+    let mut visited = vec![false; n + 1];
     let mut rpo = Vec::new();
     dfs_collect(exit_node, &rev_preds, &mut visited, &mut rpo);
     rpo.reverse();
 
-    let mut rpo_number = vec![0usize; n];
+    let mut rpo_number = vec![0usize; n + 1];
     for (i, &b) in rpo.iter().enumerate() {
         rpo_number[b] = i;
     }
 
     let undef = usize::MAX;
-    let mut pdom = vec![undef; n];
+    let mut pdom = vec![undef; n + 1];
     pdom[exit_node] = exit_node;
 
     let intersect = |pdom: &[usize], rpo_num: &[usize], mut b1: usize, mut b2: usize| -> usize {
@@ -134,9 +145,8 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
             }
             // In reverse graph, successors of b = forward successors
             let mut new_pdom = undef;
-            for succ in cfg.successors(BlockId(b)) {
-                let s = succ.0;
-                if s >= n || pdom[s] == undef {
+            for &s in &succs[b] {
+                if pdom[s] == undef {
                     continue;
                 }
                 if new_pdom == undef {
@@ -152,6 +162,7 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
         }
     }
 
+    pdom.truncate(n);
     pdom.into_iter()
         .map(|i| BlockId(if i == undef { exit_node } else { i }))
         .collect()

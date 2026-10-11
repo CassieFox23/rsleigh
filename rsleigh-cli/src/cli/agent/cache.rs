@@ -89,7 +89,12 @@ pub(super) enum Outcome {
     },
 }
 
-pub(super) fn decoded(instructions: Vec<(u64, pcode_ir::Instruction)>) -> Vec<DecodedInstruction> {
+/// Evidence lists instructions in address order; detached fragments follow
+/// the entry in decode order.
+pub(super) fn decoded(
+    mut instructions: Vec<(u64, pcode_ir::Instruction)>,
+) -> Vec<DecodedInstruction> {
+    instructions.sort_by_key(|(address, _)| *address);
     instructions.into_iter().map(|(address,inst)|DecodedInstruction {
         address,len:inst.len,disassembly:inst.disassembly,operations:inst.ops,
         constructor:inst.constructor.map(|c|json!({"source":c.source,"table_id":c.table_id,"constructor_id":c.constructor_id})),

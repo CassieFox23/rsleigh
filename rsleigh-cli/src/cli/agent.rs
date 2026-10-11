@@ -329,10 +329,7 @@ fn build_agent_analysis(
             ));
         }
         let status = evidence_status(!instructions.is_empty(), &diagnostics);
-        let size = instructions
-            .last()
-            .map(|(inst_addr, inst)| inst_addr + inst.len - address)
-            .unwrap_or(0);
+        let size: u64 = instructions.iter().map(|(_, inst)| inst.len).sum();
         let mut complexity = 1usize;
         let mut direct_targets = Vec::new();
         for (_, instruction) in &instructions {
@@ -401,17 +398,8 @@ fn build_agent_analysis(
         if instructions.is_empty() {
             continue;
         }
-        let pseudocode = recover_decompile(
-            || {
-                rsleigh_decompile::decompile_with_binary(
-                    arch,
-                    &instructions,
-                    Some(data),
-                    Some(path),
-                )
-            },
-            &mut function.diagnostics,
-        );
+        let pseudocode =
+            decompile_function(arch, &instructions, data, path, &mut function.diagnostics);
         function.status = evidence_status(true, &function.diagnostics);
         let meta = rsleigh_decompile::analysis::extract_function_meta(
             &function.name,
@@ -611,6 +599,91 @@ fn recover_decompile(f: impl FnOnce() -> String, diagnostics: &mut Vec<Value>) -
             String::new()
         }
     }
+}
+
+/// Card diagnostics that describe the function itself rather than an
+/// interrupted run; analyses carrying only these are complete and cacheable.
+const DETERMINISTIC_DIAGNOSTICS: &[&str] =
+    &["unresolved_control_flow", "body_truncated", "empty_body"];
+
+/// Decompile one function body and record what its pseudocode cannot show:
+/// control flow the pipeline could not resolve, and a body that prints empty
+/// although the P-code calls or branches.
+fn decompile_function(
+    arch: rsleigh_api::Architecture,
+    instructions: &[(u64, pcode_ir::Instruction)],
+    data: &[u8],
+    path: &Path,
+    diagnostics: &mut Vec<Value>,
+) -> String {
+    use rsleigh_decompile::ir::{DiagKind, Severity};
+    let mut pipeline = Vec::new();
+    let text = recover_decompile(
+        || {
+            let (text, found) = rsleigh_decompile::decompile_with_diagnostics(
+                arch,
+                instructions,
+                Some(data),
+                Some(path),
+            );
+            pipeline = found;
+            text
+        },
+        diagnostics,
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for d in &pipeline {
+        let unresolved = matches!(
+            d.kind,
+            DiagKind::UnresolvedBranchTarget | DiagKind::UnrecoveredIndirectJump
+        );
+        if unresolved && !matches!(d.severity, Severity::Info) && seen.insert(d.addr) {
+            diagnostics.push(json!({"stage":"decompile","code":"unresolved_control_flow",
+                "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail}));
+        }
+    }
+    let does_work = instructions.iter().flat_map(|(_, i)| &i.ops).any(|op| {
+        matches!(
+            op,
+            pcode_ir::PcodeOp::Call { .. }
+                | pcode_ir::PcodeOp::CallInd { .. }
+                | pcode_ir::PcodeOp::Branch { .. }
+                | pcode_ir::PcodeOp::CBranch { .. }
+                | pcode_ir::PcodeOp::BranchInd { .. }
+        )
+    });
+    if !text.is_empty() && does_work && pseudocode_body_is_empty(&text) {
+        diagnostics.push(diagnostic(
+            "decompile",
+            "empty_body",
+            "pseudocode body is empty although the P-code calls or branches",
+        ));
+    }
+    text
+}
+
+/// True when the function body holds nothing but declarations, comments,
+/// braces, and a bare `return;`.
+fn pseudocode_body_is_empty(text: &str) -> bool {
+    !text
+        .lines()
+        .skip_while(|l| !l.trim_end().ends_with('{'))
+        .skip(1)
+        .map(str::trim)
+        .any(|t| {
+            let declaration = t.ends_with(';')
+                && !t.contains('=')
+                && !t.contains('(')
+                && !t.starts_with("return")
+                && t.contains(' ');
+            !(t.is_empty()
+                || t == "}"
+                || t == "return;"
+                || t.starts_with("//")
+                || t.starts_with("/*")
+                || t.starts_with('*')
+                || declaration)
+        })
 }
 
 fn value_arg<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>, AgentError> {
@@ -926,6 +999,16 @@ fn run_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_body_ignores_declarations_comments_and_bare_return() {
+        let empty = "// 0x42960\nvoid sqlite3_free(void * param_0) {\n    long lVar1;\n    /* note */\n\nreturn;\n}\n";
+        assert!(pseudocode_body_is_empty(empty));
+        let call = "void f(void) {\n    long lVar1;\n    free(lVar1);\n}\n";
+        assert!(!pseudocode_body_is_empty(call));
+        let value = "int g(void) {\nreturn 0;\n}\n";
+        assert!(!pseudocode_body_is_empty(value));
+    }
+
     #[test]
     fn decompiler_failures_are_partial_when_decode_evidence_survives() {
         for panic in [false, true] {

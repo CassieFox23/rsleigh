@@ -35,7 +35,12 @@ fn auxiliary_inputs(binary_path: &Path) -> Result<Value, String> {
 }
 
 fn validate(analysis: &Analysis) -> Result<(), String> {
-    if analysis.instructions.is_empty() || !analysis.diagnostics.is_empty() {
+    let interrupted = analysis.diagnostics.iter().any(|d| {
+        !DETERMINISTIC_DIAGNOSTICS
+            .iter()
+            .any(|code| d["code"] == *code)
+    });
+    if analysis.instructions.is_empty() || interrupted {
         return Err("incomplete card analysis".into());
     }
     if analysis
@@ -107,15 +112,11 @@ pub(super) fn prepare(
     metrics["decoded_instructions"] = json!(instructions.len());
     let pseudocode = if !instructions.is_empty() && rsleigh_decompile::budget::stopped().is_none() {
         metrics["ssa_builds"] = json!(1);
-        recover_decompile(
-            || {
-                rsleigh_decompile::decompile_with_binary(
-                    arch,
-                    &instructions,
-                    Some(data),
-                    Some(Path::new(binary_path)),
-                )
-            },
+        decompile_function(
+            arch,
+            &instructions,
+            data,
+            Path::new(binary_path),
             &mut diagnostics,
         )
     } else {

@@ -107,6 +107,104 @@ pub fn parse_eh_frame(binary: &[u8]) -> HashMap<u64, Vec<TryRegion>> {
     out
 }
 
+/// Code extents recorded by `.eh_frame`.
+#[derive(Debug, Default)]
+pub struct FdeLayout {
+    /// FDE start → end (exclusive) for every non-PLT FDE.
+    pub extents: HashMap<u64, u64>,
+    /// Starts of FDEs whose code begins inside an established frame.
+    ///
+    /// At a function entry the call has pushed only the return address, so
+    /// the first unwind row is the architecture's entry state. GCC hot/cold
+    /// splitting gives each `foo.cold` part its own FDE whose first row
+    /// already records `foo`'s frame (larger CFA offset, saved callee
+    /// registers). Function discovery lists those starts as functions, but
+    /// they are pieces of the function that jumps to them. The entry state
+    /// is the commonest first-row CFA in the binary.
+    pub mid_frame: std::collections::HashSet<u64>,
+}
+
+/// Read FDE extents and mid-frame starts. PLT FDEs are skipped: PLT0 also
+/// starts mid-frame but is shared lazy-binding code, not a fragment.
+pub fn fde_layout(binary: &[u8]) -> FdeLayout {
+    let mut out = FdeLayout::default();
+    let Ok(goblin::Object::Elf(elf)) = goblin::Object::parse(binary) else {
+        return out;
+    };
+    let mut eh_frame_data: Option<&[u8]> = None;
+    let (mut eh_frame_addr, mut text_addr) = (0u64, 0u64);
+    let mut plt = Vec::new();
+    for sh in &elf.section_headers {
+        let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        if name == ".eh_frame" {
+            let (off, sz) = (sh.sh_offset as usize, sh.sh_size as usize);
+            if off + sz <= binary.len() {
+                eh_frame_data = Some(&binary[off..off + sz]);
+                eh_frame_addr = sh.sh_addr;
+            }
+        } else if name == ".text" {
+            text_addr = sh.sh_addr;
+        } else if name.starts_with(".plt") {
+            plt.push(sh.sh_addr..sh.sh_addr + sh.sh_size);
+        }
+    }
+    let Some(data) = eh_frame_data else {
+        return out;
+    };
+    let bases = BaseAddresses::default()
+        .set_eh_frame(eh_frame_addr)
+        .set_text(text_addr);
+    let eh_frame = EhFrame::new(data, LittleEndian);
+    let mut entries = eh_frame.entries(&bases);
+    let mut ctx = gimli::UnwindContext::new();
+    let mut first_rows = Vec::new();
+    while let Ok(Some(entry)) = entries.next() {
+        let CieOrFde::Fde(partial) = entry else {
+            continue;
+        };
+        let Ok(fde) = partial.parse(EhFrame::cie_from_offset) else {
+            continue;
+        };
+        let start = fde.initial_address();
+        if plt.iter().any(|r| r.contains(&start)) {
+            continue;
+        }
+        out.extents.insert(start, start + fde.len());
+        let ra = fde.cie().return_address_register();
+        let Ok(row) = fde.unwind_info_for_address(&eh_frame, &bases, &mut ctx, start) else {
+            continue;
+        };
+        let saves = row.registers().any(|(register, rule)| {
+            *register != ra
+                && !matches!(
+                    rule,
+                    gimli::RegisterRule::Undefined | gimli::RegisterRule::SameValue
+                )
+        });
+        first_rows.push((start, row.cfa().clone(), saves));
+    }
+    let mut counts: Vec<(&gimli::CfaRule<usize>, usize)> = Vec::new();
+    for (_, cfa, _) in &first_rows {
+        match counts.iter_mut().find(|(rule, _)| *rule == cfa) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((cfa, 1)),
+        }
+    }
+    let Some(entry_cfa) = counts
+        .iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(rule, _)| (*rule).clone())
+    else {
+        return out;
+    };
+    for (start, cfa, saves) in first_rows {
+        if saves || cfa != entry_cfa {
+            out.mid_frame.insert(start);
+        }
+    }
+    out
+}
+
 fn va_to_file_offset(elf: &goblin::elf::Elf, va: u64) -> Option<usize> {
     for sh in &elf.section_headers {
         if va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {

@@ -50,6 +50,14 @@ pub enum DiagKind {
     /// — both produce identical machine code. This diagnostic surfaces the
     /// ambiguity so callers can audit the inferred return.
     StaleReturnInherited,
+    /// A jump leaves the decoded body (direct target outside every decoded
+    /// instruction, or an indirect jump through a slot or function pointer);
+    /// it was modeled as a call followed by a return.
+    TailCall,
+    /// An indirect jump computes its target (jump-table dispatch or similar)
+    /// and no successor could be recovered; code reached only through it is
+    /// missing from the output.
+    UnrecoveredIndirectJump,
 }
 
 /// One observation surfaced from the decode/lift/SSA pipeline.
