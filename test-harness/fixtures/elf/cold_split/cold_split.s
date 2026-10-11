@@ -5,8 +5,9 @@
 #           own FDE that starts inside check's frame (CFA=RSP+16, RBX saved).
 #           The binary is stripped, so discovery lists check.cold as a
 #           function of its own.
-# dispatch: PIC jump-table switch whose successors need table recovery.
+# dispatch: PIC jump-table switch; its cases come from the table.
 # fatal:    noreturn helper called from the cold part.
+# computed: jump to a computed address with no table to recover.
 
     .intel_syntax noprefix
 
@@ -78,6 +79,17 @@ dispatch:
 fatal:
     .cfi_startproc
     ud2
+    .cfi_endproc
+
+    .globl computed
+    .type computed,@function
+computed:
+    .cfi_startproc
+    lea rax, [rip + .Lbase]
+    add rax, rdi
+    jmp rax
+.Lbase:
+    ret
     .cfi_endproc
 
     .section .rodata

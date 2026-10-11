@@ -27,6 +27,7 @@ pub mod iot_capabilities;
 pub mod iot_family;
 pub mod ir;
 pub mod jmp_rax_trampoline;
+pub mod jump_table;
 pub mod memory;
 pub mod opaque_pred;
 pub mod pdb_info;
@@ -115,7 +116,9 @@ pub fn folded_ssa(
     instructions: &[(u64, Instruction)],
     binary: Option<&[u8]>,
 ) -> ir::SsaCfg {
-    let cfg = cfg::build_cfg(instructions);
+    let image = binary.map(jump_table::ImageMemory::new);
+    let read = |va: u64, len: usize| image.as_ref()?.read(va, len);
+    let cfg = cfg::build_cfg_with_memory(instructions, &read);
     let cc = detect_cc(arch, binary);
     let mut ssa = ssa::build_ssa_for_arch(&cfg, cc, arch);
     fold::fold_for_arch(&mut ssa, cc, arch);
@@ -155,7 +158,9 @@ pub fn decompile_with_diagnostics(
     // patterns are handled by the SSA builder as Expr::Ternary, not as CFG branches.
     let expanded: Vec<(u64, pcode_ir::Instruction)> = instructions.to_vec();
 
-    let cfg = cfg::build_cfg(&expanded);
+    let image = binary.map(jump_table::ImageMemory::new);
+    let read = |va: u64, len: usize| image.as_ref()?.read(va, len);
+    let cfg = cfg::build_cfg_with_memory(&expanded, &read);
     if cfg.blocks.is_empty() {
         return ("// no blocks\n".to_string(), cfg.diagnostics);
     }

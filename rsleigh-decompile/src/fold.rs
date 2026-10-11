@@ -291,6 +291,8 @@ fn fold_with_native_return(ssa: &mut SsaCfg, cc: CallingConv, native_return: Opt
         recount_uses(ssa);
         recover_conditions(ssa);
         mba_simplify(ssa);
+        recognize_magic_division(ssa);
+        recognize_shift_add_multiply(ssa);
         detect_return_values(ssa, native_return);
         recount_uses(ssa);
         // Name loop Phi variables so the printer uses the name instead of
@@ -854,6 +856,268 @@ fn fold_once(ssa: &mut SsaCfg) {
 /// Phase 1: Pattern-based — cancellation, absorption, double negation
 /// Phase 2: Oracle-based — evaluate expressions on sample inputs, match I/O
 ///          behavior against a table of simple canonical forms
+// ---- Pass: Division by a constant ----
+// Compilers divide an unsigned 32-bit value by a constant with a
+// multiply-high and shifts, and take the remainder as x - q * d (often
+// `q * 8 - q` via lea/sub):
+//   A: q = (zext(x) * M) >> k                                  (k >= 32)
+//   B: t = (zext(x) * M) >> 32;  q = (((x - t) >> 1) + t) >> s
+// A candidate divisor replaces the arithmetic only after the arithmetic is
+// checked against x / d on sample inputs.
+
+fn magic_strip(vars: &[VarDef], mut v: VarId) -> VarId {
+    for _ in 0..8 {
+        match &safe_var(vars, v).expr {
+            Expr::Var(inner) | Expr::UnaryOp(UnaryOpKind::Zext, inner) => v = *inner,
+            _ => break,
+        }
+    }
+    v
+}
+
+/// Like [`magic_strip`], but stops at a narrower view of a wider value
+/// (`ECX = Var(RAX)`): the 32-bit operand of the arithmetic.
+fn magic_view(vars: &[VarDef], mut v: VarId) -> VarId {
+    for _ in 0..8 {
+        let def = safe_var(vars, v);
+        match &def.expr {
+            Expr::UnaryOp(UnaryOpKind::Zext, inner) => v = *inner,
+            Expr::Var(inner) if safe_var(vars, *inner).size == def.size => v = *inner,
+            _ => break,
+        }
+    }
+    v
+}
+
+fn magic_const(vars: &[VarDef], v: VarId) -> Option<u64> {
+    match safe_var(vars, magic_strip(vars, v)).expr {
+        Expr::Const(c, _) => Some(c),
+        _ => None,
+    }
+}
+
+fn magic_binop(vars: &[VarDef], v: VarId) -> Option<(BinOpKind, VarId, VarId)> {
+    match &safe_var(vars, magic_strip(vars, v)).expr {
+        Expr::BinOp(kind, l, r) => Some((*kind, *l, *r)),
+        _ => None,
+    }
+}
+
+/// (x, M, k) for `(zext(x) * M) >> k` with a 32-bit `x`.
+fn magic_mulhi(vars: &[VarDef], v: VarId) -> Option<(VarId, u64, u32)> {
+    let (BinOpKind::Lsr, product, shift) = magic_binop(vars, v)? else {
+        return None;
+    };
+    let k = magic_const(vars, shift)?;
+    let (BinOpKind::Mult, l, r) = magic_binop(vars, product)? else {
+        return None;
+    };
+    let (x, m) = match (magic_const(vars, l), magic_const(vars, r)) {
+        (_, Some(m)) => (magic_view(vars, l), m),
+        (Some(m), _) => (magic_view(vars, r), m),
+        _ => return None,
+    };
+    let is_u32 = safe_var(vars, x).size == 4;
+    (is_u32 && (32..64).contains(&k) && m < (1 << 33)).then_some((x, m, k as u32))
+}
+
+/// True when `eval(x) == x / d` for every sampled 32-bit `x`.
+fn magic_divides(eval: impl Fn(u64) -> u64, d: u64) -> bool {
+    if d < 2 || d > u32::MAX as u64 {
+        return false;
+    }
+    let mut samples: Vec<u64> = (0..2048).collect();
+    samples.extend([u32::MAX as u64, u32::MAX as u64 - 1, 1 << 31, (1 << 31) - 1]);
+    for n in [1, 2, 3, 1000, 0x10000, u32::MAX as u64 / d] {
+        samples.extend(
+            [n * d - 1, n * d, n * d + 1]
+                .into_iter()
+                .filter(|x| *x <= u32::MAX as u64),
+        );
+    }
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    for _ in 0..4096 {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        samples.push(seed >> 32);
+    }
+    samples.into_iter().all(|x| eval(x) == x / d)
+}
+
+/// (x, d) when `q` computes `x / d` by one of the multiply-high forms.
+fn magic_division(vars: &[VarDef], q: VarId) -> Option<(VarId, u64)> {
+    const MASK: u64 = 0xffff_ffff;
+    if let Some((x, m, k)) = magic_mulhi(vars, q) {
+        let eval = |x: u64| ((x as u128 * m as u128) >> k) as u64;
+        let d0 = ((1u128 << k) / m.max(1) as u128) as u64;
+        return [d0, d0 + 1]
+            .into_iter()
+            .find(|&d| magic_divides(eval, d))
+            .map(|d| (x, d));
+    }
+    let (BinOpKind::Lsr, sum, shift) = magic_binop(vars, q)? else {
+        return None;
+    };
+    let s = magic_const(vars, shift)?;
+    let (BinOpKind::Add, a, b) = magic_binop(vars, sum)? else {
+        return None;
+    };
+    for (half, t) in [(a, b), (b, a)] {
+        let Some((x, m, 32)) = magic_mulhi(vars, t) else {
+            continue;
+        };
+        let Some((BinOpKind::Lsr, diff, one)) = magic_binop(vars, half) else {
+            continue;
+        };
+        let Some((BinOpKind::Sub, minuend, subtrahend)) = magic_binop(vars, diff) else {
+            continue;
+        };
+        if magic_const(vars, one) != Some(1)
+            || magic_strip(vars, minuend) != magic_strip(vars, x)
+            || magic_strip(vars, subtrahend) != magic_strip(vars, t)
+            || s > 31
+        {
+            continue;
+        }
+        let eval = |x: u64| {
+            let t = (x * m) >> 32;
+            ((((x.wrapping_sub(t)) & MASK) >> 1) + t) >> s
+        };
+        let d0 = ((1u128 << (33 + s)) / ((1u128 << 32) + m as u128)) as u64;
+        if let Some(d) = [d0, d0 + 1].into_iter().find(|&d| magic_divides(eval, d)) {
+            return Some((x, d));
+        }
+    }
+    None
+}
+
+/// k when `v` computes `q * k` with multiplies, shifts, adds, and subtracts.
+fn magic_multiple(vars: &[VarDef], v: VarId, q: VarId, depth: u32) -> Option<u64> {
+    let base = magic_strip(vars, v);
+    if base == q {
+        return Some(1);
+    }
+    if depth == 0 {
+        return None;
+    }
+    let (kind, l, r) = magic_binop(vars, base)?;
+    let of = |v| magic_multiple(vars, v, q, depth - 1);
+    match kind {
+        BinOpKind::Mult => match (magic_const(vars, r), magic_const(vars, l)) {
+            (Some(c), _) => of(l)?.checked_mul(c),
+            (_, Some(c)) => of(r)?.checked_mul(c),
+            _ => None,
+        },
+        BinOpKind::Lsl => of(l)?.checked_shl(u32::try_from(magic_const(vars, r)?).ok()?),
+        BinOpKind::Add => of(l)?.checked_add(of(r)?),
+        BinOpKind::Sub => of(l)?.checked_sub(of(r)?),
+        _ => None,
+    }
+}
+
+/// `x + (x << k)` is `x * (2^k + 1)`: compilers spell small multiplies
+/// (`h * 33` in string hashes) as a shift and an add.
+fn recognize_shift_add_multiply(ssa: &mut SsaCfg) {
+    let mut rewrites = Vec::new();
+    for i in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
+        let Expr::BinOp(BinOpKind::Add, a, b) = ssa.vars[i].expr else {
+            continue;
+        };
+        for (x, shifted) in [(a, b), (b, a)] {
+            let Some((BinOpKind::Lsl, base, shift)) = magic_binop(&ssa.vars, shifted) else {
+                continue;
+            };
+            let Some(k) = magic_const(&ssa.vars, shift).filter(|k| (1..16).contains(k)) else {
+                continue;
+            };
+            if magic_strip(&ssa.vars, base) == magic_strip(&ssa.vars, x) {
+                rewrites.push((i, x, (1u64 << k) + 1));
+                break;
+            }
+        }
+    }
+    for (i, x, factor) in rewrites {
+        let size = ssa.vars[i].size;
+        let c = ssa.new_var(
+            pcode_ir::Varnode::constant(factor, size),
+            Expr::Const(factor, size),
+            size,
+        );
+        crate::provenance::rewrite(&mut ssa.vars, i, Expr::BinOp(BinOpKind::Mult, x, c));
+    }
+}
+
+fn recognize_magic_division(ssa: &mut SsaCfg) {
+    let quotients: Vec<(usize, VarId, u64)> = (0..ssa.vars.len())
+        .filter(|&i| matches!(ssa.vars[i].expr, Expr::BinOp(BinOpKind::Lsr, _, _)))
+        .filter_map(|i| {
+            crate::budget::work("fold", 1);
+            magic_division(&ssa.vars, VarId(i as u32)).map(|(x, d)| (i, x, d))
+        })
+        .collect();
+    for (q_idx, x, d) in quotients {
+        let size = ssa.vars[x.0 as usize].size;
+        let divisor = ssa.new_var(
+            pcode_ir::Varnode::constant(d, size),
+            Expr::Const(d, size),
+            size,
+        );
+        crate::provenance::rewrite(
+            &mut ssa.vars,
+            q_idx,
+            Expr::BinOp(BinOpKind::Div, x, divisor),
+        );
+        let q = VarId(q_idx as u32);
+        // `x - q * d` is the remainder; `x == q * d` tests it against zero.
+        let mut remainders = Vec::new();
+        let mut tests = Vec::new();
+        for i in 0..ssa.vars.len() {
+            let Expr::BinOp(kind, l, r) = ssa.vars[i].expr else {
+                continue;
+            };
+            let x_value = magic_strip(&ssa.vars, x);
+            let is_x = |v| magic_strip(&ssa.vars, v) == x_value;
+            let is_qd = |v| magic_multiple(&ssa.vars, v, q, 6) == Some(d);
+            match kind {
+                BinOpKind::Sub if is_x(l) && is_qd(r) => remainders.push(i),
+                BinOpKind::Eq | BinOpKind::NotEq
+                    if (is_x(l) && is_qd(r)) || (is_x(r) && is_qd(l)) =>
+                {
+                    tests.push((i, kind))
+                }
+                _ => {}
+            }
+        }
+        if remainders.is_empty() && tests.is_empty() {
+            continue;
+        }
+        let rem = ssa.new_var(
+            pcode_ir::Varnode {
+                space: AddressSpaceId::Unique,
+                offset: 0xE200_0000 + ssa.vars.len() as u64,
+                size,
+            },
+            Expr::BinOp(BinOpKind::Rem, x, divisor),
+            size,
+        );
+        for i in remainders {
+            crate::provenance::rewrite(&mut ssa.vars, i, Expr::Var(rem));
+        }
+        if !tests.is_empty() {
+            let zero = ssa.new_var(
+                pcode_ir::Varnode::constant(0, size),
+                Expr::Const(0, size),
+                size,
+            );
+            for (i, kind) in tests {
+                crate::provenance::rewrite(&mut ssa.vars, i, Expr::BinOp(kind, rem, zero));
+            }
+        }
+    }
+}
+
 fn mba_simplify(ssa: &mut SsaCfg) {
     // Phase 1: Pattern-based simplification (fast, catches structural patterns)
     for _pass in 0..4 {
@@ -5415,6 +5679,12 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
         let vdef = &ssa.vars[v];
         if let Expr::Load(ptr_id) = &vdef.expr {
             let ptr_def = safe_var(&ssa.vars, *ptr_id);
+            // A register pointer used elsewhere (`p++` feeding the loop and
+            // the load) is a value of its own: rewriting the load as
+            // `old_p->field_1` reads `p` after it was advanced.
+            if ptr_def.varnode.space == AddressSpaceId::Register && ptr_def.use_count > 1 {
+                continue;
+            }
             if let Expr::BinOp(BinOpKind::Add, base, offset_var) = &ptr_def.expr {
                 let offset_def = safe_var(&ssa.vars, *offset_var);
                 if let Expr::Const(offset_val, _) = &offset_def.expr {

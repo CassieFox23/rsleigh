@@ -322,11 +322,17 @@ impl<'a> ExecutionGenerator<'a> {
             })
             .collect();
 
-        // Extend ops from all subtable caches
+        // Implicitly built subtables run before the constructor's own
+        // statements; a subtable with an explicit `build` runs where that
+        // statement stands (see `gen_build`). x86-64 `MOV r32, r32` is
+        // `{ Rmr32 = Reg32; build check_Rmr32_dest; }`: the zero extension
+        // into the 64-bit register must follow the 32-bit write.
+        let built = Self::explicitly_built(execution);
         let subtable_ops_extend: TokenStream = self
             .constructor
             .table_fields
             .iter()
+            .filter(|(table_id, _)| !built.contains(*table_id))
             .map(|(_, field)| {
                 let cache_ops = format_ident!("{}_ops", field);
                 quote! { ops.extend(#cache_ops); }
@@ -788,9 +794,27 @@ impl<'a> ExecutionGenerator<'a> {
         }
     }
 
-    fn gen_build(&self, _build: &Build) -> TokenStream {
-        // Build ops are already added via the subtable cache at the top of lift()
-        quote! {}
+    fn gen_build(&self, build: &Build) -> TokenStream {
+        // The subtable was lifted (and its unique offsets remapped) at the
+        // top of lift(); its ops are emitted here, once.
+        let Some(field) = self.constructor.table_fields.get(&build.table) else {
+            return quote! {};
+        };
+        let cache_ops = format_ident!("{}_ops", field);
+        quote! { ops.extend(std::mem::take(&mut #cache_ops)); }
+    }
+
+    /// Tables named by a `build` statement anywhere in `execution`.
+    fn explicitly_built(execution: &Execution) -> std::collections::HashSet<crate::TableId> {
+        execution
+            .blocks()
+            .iter()
+            .flat_map(|block| block.statements.iter())
+            .filter_map(|stmt| match stmt {
+                Statement::Build(b) => Some(b.table),
+                _ => None,
+            })
+            .collect()
     }
 
     fn gen_user_call(&self, call: &UserCall, execution: &Execution) -> TokenStream {
