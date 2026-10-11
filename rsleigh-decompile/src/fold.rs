@@ -2596,15 +2596,25 @@ fn extract_cdq_value(high_part: VarId, low_part: VarId, vars: &[VarDef]) -> Opti
     None
 }
 
+/// Definitions followed before a chain is treated as non-constant. Loop-carried
+/// values can define themselves (`x = x + 1`), so the walk must be bounded.
+const CONST_FOLD_DEPTH: u32 = 64;
+
 /// Constant folding: evaluate BinOp(Const, Const) → Const.
 /// This handles chains of arithmetic that resolve to constants at compile time.
 fn const_fold_expr(expr: &Expr, vars: &[VarDef]) -> Option<(u64, u32)> {
+    const_fold_bounded(expr, vars, CONST_FOLD_DEPTH)
+}
+
+fn const_fold_bounded(expr: &Expr, vars: &[VarDef], depth: u32) -> Option<(u64, u32)> {
+    let depth = depth.checked_sub(1)?;
+    let fold = |id: &VarId| const_fold_bounded(&vars[id.0 as usize].expr, vars, depth);
     match expr {
         Expr::Const(val, sz) => Some((*val, *sz)),
-        Expr::Var(id) => const_fold_expr(&vars[id.0 as usize].expr, vars),
+        Expr::Var(id) => fold(id),
         Expr::BinOp(kind, left, right) => {
-            let (lv, lsz) = const_fold_expr(&vars[left.0 as usize].expr, vars)?;
-            let (rv, _) = const_fold_expr(&vars[right.0 as usize].expr, vars)?;
+            let (lv, lsz) = fold(left)?;
+            let (rv, _) = fold(right)?;
             let mask = if lsz >= 8 {
                 u64::MAX
             } else {
@@ -2625,7 +2635,7 @@ fn const_fold_expr(expr: &Expr, vars: &[VarDef]) -> Option<(u64, u32)> {
             Some((result, lsz))
         }
         Expr::UnaryOp(kind, inner) => {
-            let (v, sz) = const_fold_expr(&vars[inner.0 as usize].expr, vars)?;
+            let (v, sz) = fold(inner)?;
             let mask = if sz >= 8 {
                 u64::MAX
             } else {
@@ -6541,5 +6551,42 @@ mod nway_phi_tests {
             }
             other => panic!("loop-carry phi was rewritten: {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod const_fold_tests {
+    use super::*;
+    use pcode_ir::{AddressSpaceId, Varnode};
+
+    #[test]
+    fn a_definition_cycle_does_not_fold() {
+        // A loop-carried value: x = x + 1. Following the definitions without
+        // a bound recursed until the stack overflowed (Fedora libsqlite3
+        // 0x11a270 via `--search`, morluto/rea#1389).
+        let mut ssa = SsaCfg {
+            blocks: Vec::new(),
+            vars: Vec::new(),
+            entry: BlockId(0),
+            diagnostics: Vec::new(),
+        };
+        let reg = Varnode {
+            space: AddressSpaceId::Register,
+            offset: 0,
+            size: 8,
+        };
+        let one = ssa.new_var(reg, Expr::Const(1, 8), 8);
+        let x = ssa.new_var(reg, Expr::Const(0, 8), 8);
+        ssa.vars[x.0 as usize].expr = Expr::BinOp(BinOpKind::Add, x, one);
+        assert_eq!(
+            const_fold_expr(&ssa.vars[x.0 as usize].expr, &ssa.vars),
+            None
+        );
+        // A finite chain still folds.
+        let y = ssa.new_var(reg, Expr::BinOp(BinOpKind::Add, one, one), 8);
+        assert_eq!(
+            const_fold_expr(&ssa.vars[y.0 as usize].expr, &ssa.vars),
+            Some((2, 8))
+        );
     }
 }
