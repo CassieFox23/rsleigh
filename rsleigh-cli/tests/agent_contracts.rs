@@ -170,7 +170,7 @@ fn xrefs_and_search_follow_the_agent_contract() {
     assert_eq!(xrefs["function"]["address"], "0x401080");
     assert_eq!(
         xrefs["callers"],
-        serde_json::json!([{"address":"0x401020", "name":"calls", "call_sites":2}])
+        serde_json::json!([{"address":"0x401020", "name":"calls", "call_sites":2, "tail_calls":0}])
     );
     assert_eq!(xrefs["limits"]["truncated_scans"], 0);
     // QUERY may follow --search or the selector flag, as before the catalog.
