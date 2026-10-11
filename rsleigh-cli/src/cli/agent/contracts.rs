@@ -835,7 +835,7 @@ pub(super) const ERROR_CODES: &[(&str, &str)] = &[
     ("invalid_value", "A flag value has the wrong type or range"),
     (
         "invalid_selector",
-        "Slice root flags do not select exactly one root",
+        "Slice root flags do not select exactly one supported root",
     ),
     (
         "invalid_combination",
@@ -884,6 +884,10 @@ pub(super) const ERROR_CODES: &[(&str, &str)] = &[
     (
         "write_failed",
         "Publishing output files failed; previous output is unchanged",
+    ),
+    (
+        "execution_limit",
+        "An execution limit stopped analysis before any evidence was produced",
     ),
     ("analysis_failed", "Analysis could not produce any evidence"),
     (

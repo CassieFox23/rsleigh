@@ -57,7 +57,11 @@ dependency-query support. For example, MIPS32 and RISC-V scalar returns are
 are `unsupported` and fail with `selection_error.code: "unsupported_root"`.
 
 Agent failures keep `status: "failed"`, `error`, and a `command` diagnostic,
-and add a stable `error_code`:
+and add a stable `error_code`. Card and slice failures found during analysis
+keep their own diagnostics and metrics instead of a `command` diagnostic and
+still set `error_code`; for example, a deadline that stops work before the first
+instruction decodes reports `execution_limit`, and a slice `selection_error`
+reports `invalid_selector`:
 
 | `error_code` | Meaning |
 |---|---|
@@ -68,7 +72,7 @@ and add a stable `error_code`:
 | `missing_value` | A flag that requires a value has none |
 | `duplicate_option` | A non-repeatable flag appears more than once |
 | `invalid_value` | A flag value has the wrong type or range |
-| `invalid_selector` | Slice root flags do not select exactly one root |
+| `invalid_selector` | Slice root flags do not select exactly one supported root |
 | `invalid_combination` | Individually valid flags cannot be combined |
 | `invalid_target` | The function target is missing, repeated, or malformed |
 | `target_not_found` | No discovered function matches the target |
@@ -81,6 +85,7 @@ and add a stable `error_code`:
 | `stale_revision` | The investigation changed since the expected revision |
 | `requirements_unmet` | Cited evidence does not satisfy the question's requirements |
 | `write_failed` | Publishing output files failed; previous output is unchanged |
+| `execution_limit` | An execution limit stopped analysis before any evidence was produced |
 | `analysis_failed` | Analysis could not produce any evidence |
 | `command_failed` | Unclassified failure; inspect the error message |
 

@@ -243,6 +243,62 @@ fn invalid_invocations_report_stable_cataloged_error_codes() {
 }
 
 #[test]
+fn evidence_failures_report_stable_cataloged_error_codes() {
+    let root = scratch();
+    let binary = root.join("seed.exe");
+    std::fs::write(&binary, seed::binary()).unwrap();
+    let file = binary.to_str().unwrap();
+    let known: Vec<String> = catalog(&root)["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["code"].as_str().unwrap().to_string())
+        .collect();
+    // Failures produced after argument validation still carry their evidence
+    // (diagnostics, metrics) but must name a cataloged cause at top level.
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (
+            vec![file, "0x401000", "--card", "--json", "--deadline-ms", "0"],
+            "execution_limit",
+        ),
+        (
+            vec![
+                file,
+                "--ssa-slice",
+                "0x401000",
+                "--return",
+                "--deadline-ms",
+                "0",
+            ],
+            "execution_limit",
+        ),
+        (vec![file, "0x0", "--card", "--json"], "analysis_failed"),
+        (
+            vec![
+                file,
+                "--ssa-slice",
+                "0x401000",
+                "--return",
+                "--at",
+                "0xdeadbeef",
+            ],
+            "invalid_selector",
+        ),
+    ];
+    for (args, expected) in cases {
+        let (code, value) = run_json(&args, &root);
+        assert_eq!(code, 1, "{args:?}: {value}");
+        assert_eq!(value["status"], "failed", "{args:?}");
+        assert_eq!(value["error_code"], expected, "{args:?}: {value}");
+        assert!(
+            known.iter().any(|k| k == expected),
+            "{expected} not cataloged"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn catalog_operations_and_flags_are_documented() {
     let root = scratch();
     let catalog = catalog(&root);
