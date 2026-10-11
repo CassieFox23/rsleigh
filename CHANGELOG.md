@@ -4,6 +4,8 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-11
+
 ### Added
 
 - `rsleigh --capabilities [--json]`: a target-free `rsleigh.capabilities/v1`
@@ -58,6 +60,25 @@ All notable user-facing changes to rsleigh are documented here.
   the result `partial` (exit 2) and is counted in `limits.truncated_scans`.
   `--raw` input keeps the raw-image output. The agent brief's suggested xrefs
   command now asks for JSON.
+
+### Fixed
+
+- Decompiler output is identical across runs; three passes no longer depend
+  on hash-map iteration order (#7).
+- Function output keeps code reached through jumps: PLT slot jumps, jumps
+  out of the decoded window, and GCC `.cold` fragments. A shared return now
+  keeps each path's value instead of the first predecessor's.
+- Generated lift code runs an explicit SLEIGH `build` where it stands, fixing
+  x86-64 `MOV r32` zero extension and ARM LDM/STM address order.
+- x86-64 PIC and absolute jump tables print as `switch`; unsigned division
+  and modulo by a constant print as `/` and `%`.
+- Stripped-ELF discovery no longer lists jump-table targets and other
+  addresses inside a function's FDE as functions.
+- Card and slice failures report a stable `error_code` (`execution_limit`,
+  `analysis_failed`, `invalid_selector`).
+- `--xrefs` no longer prints decoder panics on input that ends mid-instruction,
+  no longer reports internal temporaries as callees (`func_c3b500000`), and
+  counts calls through PLT and `.plt.got` stubs as callers.
 
 ## [0.5.0] - 2026-09-07
 
@@ -160,7 +181,8 @@ All notable user-facing changes to rsleigh are documented here.
 - Reduced false-positive ARM function discovery and added ARM-to-Thumb call
   discovery.
 
-[Unreleased]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.1...v0.4.2
