@@ -4205,26 +4205,41 @@ fn run_summary(binary_path: &str, data: &[u8]) {
 }
 
 /// Show cross-references for a function: callers, callees, strings, data refs.
+/// Bytes of each candidate caller that `--xrefs` and `--search` decode.
+const XREF_SCAN_BYTES: usize = 4096;
+
+/// (agent error code, message) for a failed `--xrefs` or `--search`.
+type LookupError = (&'static str, String);
+
+/// Callers, callees, and strings of one function, as `--xrefs` reports them.
+struct Xrefs {
+    name: String,
+    address: u64,
+    /// One entry per direct call site: (caller address, caller name).
+    call_sites: Vec<(u64, String)>,
+    callees: Vec<String>,
+    strings: Vec<String>,
+    pseudocode: String,
+    /// Functions longer than `XREF_SCAN_BYTES`; calls past the window are missed.
+    truncated_scans: usize,
+}
+
 fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
     if target_name.is_empty() {
         eprintln!("Usage: rsleigh <binary> --xrefs <func_name>");
         return;
     }
+    match collect_xrefs(binary_path, data, target_name) {
+        Ok(xrefs) => print_xrefs(&xrefs),
+        Err((_, message)) => eprintln!("{message}"),
+    }
+}
 
-    let obj = match parse_object_lenient(data) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return;
-        }
-    };
-    let (arch, segs, mut symbols) = match parse_binary(&obj, data) {
-        Some(r) => r,
-        None => {
-            eprintln!("Unsupported format");
-            return;
-        }
-    };
+fn collect_xrefs(binary_path: &str, data: &[u8], target_name: &str) -> Result<Xrefs, LookupError> {
+    let obj =
+        parse_object_lenient(data).map_err(|e| ("unsupported_format", format!("Error: {e}")))?;
+    let (arch, segs, mut symbols) = parse_binary(&obj, data)
+        .ok_or_else(|| ("unsupported_format", "Unsupported format".to_string()))?;
     if symbols.is_empty() {
         if let goblin::Object::PE(pe) = &obj {
             let base = pe.image_base as u64;
@@ -4265,8 +4280,10 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
             .map(|(a, _)| *a)
     };
     let Some(target_addr) = target_addr else {
-        eprintln!("Function '{}' not found", target_name);
-        return;
+        return Err((
+            "target_not_found",
+            format!("Function '{}' not found", target_name),
+        ));
     };
     let target_display = symbols
         .iter()
@@ -4339,6 +4356,7 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
             .chain([target_addr])
             .collect();
     let mut callers = Vec::new();
+    let mut truncated_scans = 0;
     for (func_addr, func_name) in &symbols {
         if *func_addr == target_addr {
             continue;
@@ -4351,7 +4369,7 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
             }
         });
         let Some(off) = off else { continue };
-        let max = 4096.min(data.len().saturating_sub(off as usize));
+        let max = XREF_SCAN_BYTES.min(data.len().saturating_sub(off as usize));
         if max < 2 {
             continue;
         }
@@ -4362,6 +4380,9 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
             .map(|(a, _)| *a)
             .min()
             .unwrap_or(func_addr + max as u64);
+        if next_func - func_addr > XREF_SCAN_BYTES as u64 {
+            truncated_scans += 1;
+        }
         let decode_max = ((next_func - func_addr) as usize).min(max);
         let mut insts = Vec::new();
         let mut pos = 0;
@@ -4403,19 +4424,30 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
         }
     }
 
-    // Output
+    Ok(Xrefs {
+        name: target_display.to_string(),
+        address: target_addr,
+        call_sites: callers,
+        callees,
+        strings: strings_in_target,
+        pseudocode: target_output,
+        truncated_scans,
+    })
+}
+
+fn print_xrefs(xrefs: &Xrefs) {
     println!(
         "=== Cross-references for {} (0x{:x}) ===",
-        target_display, target_addr
+        xrefs.name, xrefs.address
     );
     println!();
     let mut caller_counts: std::collections::BTreeMap<(u64, String), usize> =
         std::collections::BTreeMap::new();
-    for (addr, name) in &callers {
+    for (addr, name) in &xrefs.call_sites {
         *caller_counts.entry((*addr, name.clone())).or_insert(0) += 1;
     }
     let n_callers = caller_counts.len();
-    let n_sites = callers.len();
+    let n_sites = xrefs.call_sites.len();
     println!(
         "Called by ({} {}, {} call site{}):",
         n_callers,
@@ -4433,21 +4465,40 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
             println!("  0x{:012x}  {}", addr, name);
         }
     }
+    if xrefs.truncated_scans > 0 {
+        println!(
+            "  ({} function{} longer than {} bytes scanned only in part)",
+            xrefs.truncated_scans,
+            if xrefs.truncated_scans == 1 { "" } else { "s" },
+            XREF_SCAN_BYTES
+        );
+    }
     println!();
-    println!("Calls ({} callees):", callees.len());
-    for callee in &callees {
+    println!("Calls ({} callees):", xrefs.callees.len());
+    for callee in &xrefs.callees {
         println!("  {}", callee);
     }
     println!();
-    if !strings_in_target.is_empty() {
-        println!("Strings ({}):", strings_in_target.len());
-        for s in &strings_in_target {
+    if !xrefs.strings.is_empty() {
+        println!("Strings ({}):", xrefs.strings.len());
+        for s in &xrefs.strings {
             println!("  \"{}\"", s);
         }
         println!();
     }
     println!("Decompiled output:");
-    println!("{}", target_output);
+    println!("{}", xrefs.pseudocode);
+}
+
+/// (address, name, reason, context, pseudocode)
+type SearchMatch = (u64, String, String, String, String);
+
+/// Functions matching a `--search` query.
+struct SearchResults {
+    matches: Vec<SearchMatch>,
+    functions_searched: usize,
+    /// Functions longer than `XREF_SCAN_BYTES`; matches past the window are missed.
+    truncated_scans: usize,
 }
 
 /// Search for functions matching a query: string, API call, or hex constant.
@@ -4461,20 +4512,26 @@ fn run_search(
     decompile_results: bool,
     json_output: bool,
 ) {
-    let obj = match parse_object_lenient(data) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return;
+    match collect_search(binary_path, data, query, api_mode, const_mode, tag_mode) {
+        Ok(results) => {
+            output_search_results(&results.matches, query, json_output, decompile_results)
         }
-    };
-    let (arch, segs, mut symbols) = match parse_binary(&obj, data) {
-        Some(r) => r,
-        None => {
-            eprintln!("Unsupported format");
-            return;
-        }
-    };
+        Err((_, message)) => eprintln!("{message}"),
+    }
+}
+
+fn collect_search(
+    binary_path: &str,
+    data: &[u8],
+    query: &str,
+    api_mode: bool,
+    const_mode: bool,
+    tag_mode: bool,
+) -> Result<SearchResults, LookupError> {
+    let obj =
+        parse_object_lenient(data).map_err(|e| ("unsupported_format", format!("Error: {e}")))?;
+    let (arch, segs, mut symbols) = parse_binary(&obj, data)
+        .ok_or_else(|| ("unsupported_format", "Unsupported format".to_string()))?;
     if symbols.is_empty() {
         if let goblin::Object::PE(pe) = &obj {
             let base = pe.image_base as u64;
@@ -4525,8 +4582,8 @@ fn run_search(
         mode_str
     );
 
-    // matches: (addr, name, reason, context, pseudocode)
-    let mut matches: Vec<(u64, String, String, String, String)> = Vec::new();
+    let mut matches: Vec<SearchMatch> = Vec::new();
+    let mut truncated_scans = 0;
 
     // Tag-based search: decompile all, extract tags, filter
     if tag_mode {
@@ -4570,7 +4627,11 @@ fn run_search(
             }
         }
         // Skip the rest of the function and go to output
-        return output_search_results(&matches, query, json_output, decompile_results);
+        return Ok(SearchResults {
+            matches,
+            functions_searched: symbols.len(),
+            truncated_scans: 0,
+        });
     }
 
     for (func_addr, func_name) in &symbols {
@@ -4594,7 +4655,7 @@ fn run_search(
             }
         });
         let Some(off) = off else { continue };
-        let max = 4096.min(data.len().saturating_sub(off as usize));
+        let max = XREF_SCAN_BYTES.min(data.len().saturating_sub(off as usize));
         if max < 2 {
             continue;
         }
@@ -4606,6 +4667,9 @@ fn run_search(
             .map(|(a, _)| *a)
             .min()
             .unwrap_or(func_addr + max as u64);
+        if next_func - func_addr > XREF_SCAN_BYTES as u64 {
+            truncated_scans += 1;
+        }
         let decode_max = ((next_func - func_addr) as usize).min(max);
 
         // For API mode: decompile and search for function call pattern "api_name("
@@ -4825,12 +4889,16 @@ fn run_search(
         }
     }
 
-    output_search_results(&matches, query, json_output, decompile_results);
+    Ok(SearchResults {
+        matches,
+        functions_searched: symbols.len(),
+        truncated_scans,
+    })
 }
 
 /// Format and display search results.
 fn output_search_results(
-    matches: &[(u64, String, String, String, String)],
+    matches: &[SearchMatch],
     query: &str,
     json_output: bool,
     decompile_results: bool,

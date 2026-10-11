@@ -158,6 +158,62 @@ fn target_free_discovery_reads_no_target_and_matches_help_and_version() {
 }
 
 #[test]
+fn xrefs_and_search_follow_the_agent_contract() {
+    let root = scratch();
+    let binary = root.join("seed.exe");
+    std::fs::write(&binary, seed::binary()).unwrap();
+    let file = binary.to_str().unwrap();
+    // seed.asm: `calls` (0x401020) calls `helper` (0x401080) twice.
+    let (code, xrefs) = run_json(&[file, "--xrefs", "helper", "--json"], &root);
+    assert_eq!(code, 0, "{xrefs}");
+    assert_eq!(xrefs["schema"], "rsleigh.xrefs/v1");
+    assert_eq!(xrefs["function"]["address"], "0x401080");
+    assert_eq!(
+        xrefs["callers"],
+        serde_json::json!([{"address":"0x401020", "name":"calls", "call_sites":2}])
+    );
+    assert_eq!(xrefs["limits"]["truncated_scans"], 0);
+    // QUERY may follow --search or the selector flag, as before the catalog.
+    for argv in [
+        [file, "--search", "--api", "helper", "--json"],
+        [file, "--search", "helper", "--api", "--json"],
+    ] {
+        let (code, search) = run_json(&argv, &root);
+        assert_eq!(code, 0, "{search}");
+        assert_eq!(search["schema"], "rsleigh.search/v1");
+        assert_eq!(search["kind"], "api");
+        let addresses: Vec<&str> = search["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["address"].as_str().unwrap())
+            .collect();
+        assert!(addresses.contains(&"0x401020"), "{search}");
+    }
+    for (argv, error) in [
+        (vec![file, "--search", "--json"], "invalid_target"),
+        (
+            vec![file, "--search", "7", "--const", "--api", "--json"],
+            "invalid_combination",
+        ),
+        (vec![file, "--xrefs", "nope", "--json"], "target_not_found"),
+        (
+            vec![file, "--xrefs", "helper", "--fid", "x"],
+            "unsupported_option",
+        ),
+    ] {
+        let (code, value) = run_json(&argv, &root);
+        assert_eq!(code, 1, "{argv:?}");
+        assert_eq!(value["error_code"], error, "{argv:?}: {value}");
+    }
+    // Raw images keep the legacy renderers instead of an agent rejection.
+    let (code, stdout, _) = run(&[file, "--raw", "x86", "--search", "helper"], &root);
+    assert_eq!(code, 0);
+    assert!(String::from_utf8_lossy(&stdout).contains("String search for \"helper\""));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn invalid_invocations_report_stable_cataloged_error_codes() {
     let root = scratch();
     let binary = root.join("seed.exe");

@@ -11,7 +11,14 @@ use super::*;
 use std::io::{BufRead, Write};
 
 /// Operations exposed as tools, in addition to `capabilities`.
-const TOOLS: [&str; 4] = ["agent-brief", "card", "ssa-slice", "verify-bundle"];
+const TOOLS: [&str; 6] = [
+    "agent-brief",
+    "card",
+    "xrefs",
+    "search",
+    "ssa-slice",
+    "verify-bundle",
+];
 /// Supported protocol revisions, newest first.
 const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const INSTRUCTIONS: &str = "Static binary analysis with rsleigh. Tools mirror the \

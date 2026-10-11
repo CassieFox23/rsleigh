@@ -109,7 +109,8 @@ pub(super) fn catalog() -> Value {
             "rule":"execution status, coverage, and claim strength are independent fields",
         },
         "placeholders":{"FILE":"input binary path","FUNCTION":"discovered function name or 0x address",
-            "DIR":"output directory","STORE":"evidence store or investigation directory","BUNDLE":"evidence bundle directory"},
+            "DIR":"output directory","STORE":"evidence store or investigation directory","BUNDLE":"evidence bundle directory",
+            "QUERY":"search text, API name, constant, or comma-separated behavior tags"},
     })
 }
 

@@ -146,10 +146,16 @@ fn stdio_session_matches_cli_contract() {
         ),
         call(10, "capabilities", json!({})),
         call(11, "index", json!({"file":file})),
+        call(12, "xrefs", json!({"file":file,"xrefs":"helper"})),
+        call(
+            13,
+            "search",
+            json!({"file":file,"query":"helper","api":true}),
+        ),
         json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}),
     ]);
     assert_eq!(code, 0, "server exits cleanly when stdin closes");
-    assert_eq!(responses.len(), 12, "11 requests plus one parse error");
+    assert_eq!(responses.len(), 14, "13 requests plus one parse error");
     assert_eq!(responses["null"]["error"]["code"], -32700);
 
     let init = &responses["1"]["result"];
@@ -167,6 +173,8 @@ fn stdio_session_matches_cli_contract() {
             "capabilities",
             "agent-brief",
             "card",
+            "xrefs",
+            "search",
             "ssa-slice",
             "verify-bundle"
         ]
@@ -225,6 +233,16 @@ fn stdio_session_matches_cli_contract() {
     let (error, missing) = result("9");
     assert!(error);
     assert_eq!(missing["status"], "failed");
+    for (id, argv) in [
+        ("12", vec![file, "--xrefs", "helper", "--json"]),
+        ("13", vec![file, "helper", "--search", "--api", "--json"]),
+    ] {
+        let (error, document) = result(id);
+        assert!(!error);
+        let (code, expected) = cli(&argv);
+        assert_eq!(code, 0);
+        assert_eq!(document, expected, "{argv:?}");
+    }
     let (error, catalog) = result("10");
     assert!(!error);
     assert_eq!(catalog["schema"], "rsleigh.capabilities/v1");

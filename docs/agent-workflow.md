@@ -62,7 +62,7 @@ Use the smallest sufficient layer:
 
 ```bash
 rsleigh sample.exe --agent-brief
-rsleigh sample.exe --xrefs 0x140001000
+rsleigh sample.exe --xrefs 0x140001000 --json
 rsleigh sample.exe 0x140001000 --card --pcode
 rsleigh sample.exe 0x140001000 --card --pcode --decompile
 ```
@@ -72,7 +72,7 @@ rsleigh sample.exe 0x140001000 --card --pcode --decompile
 | Analyst question | Command or artifact | Evidence level | Important check |
 |---|---|---|---|
 | What is the file and where should I start? | `rsleigh FILE --agent-brief` | file + bounded navigation map | Reject a top-level `error`; inspect `warnings` and `limits`. |
-| Where is a string, API, constant, or behavior used? | `--search`, then `--xrefs FUNCTION` | discovery + direct references | Direct xrefs omit unresolved indirect calls. |
+| Where is a string, API, constant, or behavior used? | `--search QUERY --json`, then `--xrefs FUNCTION --json` | discovery + direct references | Direct xrefs omit unresolved indirect calls; `partial` means some functions were scanned only in part. |
 | What are the lifted instruction semantics? | `FUNCTION --card --pcode` or `--pcode-json FUNCTION` | decode + lift | Check constructor provenance and architecture warnings. |
 | Where does a value come from? | `--ssa-slice FUNCTION --return`, `--call-site ADDR --arg N`, or `--condition ADDR` | bounded dependencies + raw origins | Use one selector; inspect unresolved boundaries and per-function snapshot identities. |
 | Can a follow-up reuse decoded/SSA analysis? | `--analysis-cache DIR` on cards/slices | complete reusable snapshots | Inspect cache hits and work counters; execution limits are separate from output caps. |
@@ -181,7 +181,7 @@ rsleigh FILE --smt-candidates ADDR
   "trust": {},
   "limits": {},
   "next": [
-    "rsleigh 'sample.exe' --xrefs 0x140001000",
+    "rsleigh 'sample.exe' --xrefs 0x140001000 --json",
     "rsleigh 'sample.exe' 0x140001000 --card --json --pcode",
     "rsleigh 'sample.exe' --ssa-json 0x140001000"
   ]

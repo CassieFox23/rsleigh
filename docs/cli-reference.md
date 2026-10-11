@@ -99,12 +99,12 @@ rsleigh --mcp        # Model Context Protocol server: JSON-RPC 2.0 on stdin/stdo
 ```
 
 The server exposes the operations an agent needs first: `capabilities`,
-`agent-brief`, `card`, `ssa-slice`, and `verify-bundle`. Each tool's input
+`agent-brief`, `card`, `xrefs`, `search`, `ssa-slice`, and `verify-bundle`. Each tool's input
 schema is generated from the same catalog as the CLI:
 
 - `file` is the binary.
-- `function` is the card target.
-- The mode value uses the flag name (`ssa-slice`, `verify-bundle`).
+- `function` is the card target, and `query` is the search text.
+- The mode value uses the flag name (`xrefs`, `ssa-slice`, `verify-bundle`).
 - Each other flag becomes a property named after it without its dashes, such as
   `max-nodes` or `evidence-store`. Switches are booleans, counts are integers,
   and repeatable flags are arrays.
@@ -137,10 +137,20 @@ These analysis modes operate on parsed PE, ELF, and Mach-O binaries.
 | Where is a string used? | `--search "password"` | Matching functions; inspect xrefs next |
 | Where is an API used? | `--search --api recv` | API-based function search |
 | Where is a constant used? | `--search --const 0xCAFEBABE` | Constant-based function search |
+| Which functions carry a behavior tag? | `--search --tag network,crypto` | Tag search; decompiles every function |
 | Who refers to this function? | `--xrefs FUNCTION` | Text callers, callees, and strings |
 | How do I reuse a map across turns? | `--index DIR --limit 100` | JSON generation manifest plus artifact files; more work than a small brief |
 | What is the whole call graph? | `--callgraph` | JSON; whole-binary analysis, with calls recovered from pseudocode |
 | What is a compact overview? | `--summary` | Text summaries; whole-binary analysis |
+
+`--search` and `--xrefs` print text by default. With `--json` they emit
+`rsleigh.search/v1` and `rsleigh.xrefs/v1`. `--api`, `--const`, and `--tag` are
+mutually exclusive, and QUERY may come before or after the selector.
+`--decompile` adds each match's pseudocode. Both modes decode at most the first
+4,096 bytes of each function, so a call or match past that point is missed.
+When any function is longer, the status is `partial` (exit 2) and
+`limits.truncated_scans` counts those functions. On `--raw` input both modes
+keep their raw-image text output.
 
 Prefer the index's direct-call edges for instruction-based navigation. The
 standalone call graph and analysis tags use reconstruction heuristics. Neither
