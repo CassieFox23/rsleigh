@@ -47,13 +47,31 @@ fn requested_agent_limit(args: &[String], default: usize, maximum: usize) -> usi
         .clamp(1, maximum)
 }
 
+/// Container format and load base. The base is what the loader maps the
+/// image at before relocation (PE `ImageBase`, the lowest ELF `PT_LOAD`
+/// page, the Mach-O `__TEXT` segment), matching what Ghidra reports, not the
+/// first executable section.
 fn agent_format_and_base(obj: &goblin::Object, segs: &[(u64, u64, u64)]) -> (&'static str, u64) {
+    let lowest_section = || segs.iter().map(|(va, _, _)| *va).min().unwrap_or(0);
     match obj {
         goblin::Object::PE(pe) => ("pe", pe.image_base as u64),
-        goblin::Object::Elf(_) => ("elf", segs.iter().map(|(va, _, _)| *va).min().unwrap_or(0)),
-        goblin::Object::Mach(goblin::mach::Mach::Binary(_)) => (
+        goblin::Object::Elf(elf) => (
+            "elf",
+            elf.program_headers
+                .iter()
+                .filter(|ph| ph.p_type == goblin::elf::program_header::PT_LOAD)
+                .map(|ph| ph.p_vaddr & !ph.p_align.max(1).wrapping_sub(1))
+                .min()
+                .unwrap_or_else(lowest_section),
+        ),
+        goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => (
             "mach-o",
-            segs.iter().map(|(va, _, _)| *va).min().unwrap_or(0),
+            macho
+                .segments
+                .iter()
+                .find(|seg| seg.name().is_ok_and(|n| n == "__TEXT"))
+                .map(|seg| seg.vmaddr)
+                .unwrap_or_else(lowest_section),
         ),
         _ => ("unknown", 0),
     }

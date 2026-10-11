@@ -246,6 +246,18 @@ fn agent_brief_is_bounded_and_trust_labeled() {
 }
 
 #[test]
+fn elf_imagebase_is_the_load_base_not_the_first_code_section() {
+    // morluto/rea#1389: the ELF base was reported as the lowest executable
+    // section (`.init`), not the lowest PT_LOAD page the loader maps.
+    let elf = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-harness/fixtures/elf/cold_split/cold_split.elf");
+    let (code, value) = invoke(&elf, &["--agent-brief"]);
+    assert!(matches!(code, 0 | 2), "{value}");
+    assert_eq!(value["file"]["format"], "elf", "{value}");
+    assert_eq!(value["file"]["imagebase"], "0x400000", "{value}");
+}
+
+#[test]
 fn function_card_labels_and_caps_evidence_layers() {
     let (root, binary) = fixture();
     let output = Command::new(RSLEIGH_BIN)
