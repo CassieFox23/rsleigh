@@ -751,9 +751,24 @@ fn analyze_unique_outputs(ops: &[PcodeOp]) -> Vec<Option<UniqueOutputInfo>> {
         }
     }
 
+    // `JMP [expr]` lifts as BranchInd on a Ram varnode whose offset names the
+    // unique holding the computed address. That is a read of the unique the
+    // read visitor cannot see, so leave those writes alone.
+    let ram_dest_uniques: BTreeSet<u64> = ops
+        .iter()
+        .filter_map(|op| match op {
+            PcodeOp::BranchInd { dest } | PcodeOp::CallInd { dest }
+                if dest.space == AddressSpaceId::Ram =>
+            {
+                Some(dest.offset)
+            }
+            _ => None,
+        })
+        .collect();
+
     for (idx, op) in ops.iter().enumerate().rev() {
         if let Some(out) = get_output(op).filter(|out| out.space == AddressSpaceId::Unique) {
-            if cbranch_protected.contains(&out) {
+            if cbranch_protected.contains(&out) || ram_dest_uniques.contains(&out.offset) {
                 // This varnode is written on both sides of a CBranch — both writes
                 // are potentially live. Return None so no pass touches either write.
                 result[idx] = None;
@@ -1587,6 +1602,46 @@ mod tests {
                 out: Varnode::register(0, 2),
                 input: Varnode::constant(0xff80, 2),
             }]
+        );
+    }
+
+    #[test]
+    fn optimize_keeps_the_address_of_an_indirect_jump_through_memory() {
+        // JMP qword ptr [RDX + 0x28]: the Ram dest's offset names the unique
+        // that holds RDX + 0x28, so the add that computes it is live.
+        let mut ops = vec![
+            PcodeOp::IntSext {
+                out: Varnode::unique(0x100, 8),
+                input: Varnode::constant(0x28, 1),
+            },
+            PcodeOp::IntAdd {
+                out: Varnode::unique(0x20a, 8),
+                left: Varnode::register(0x10, 8),
+                right: Varnode::unique(0x100, 8),
+            },
+            PcodeOp::Copy {
+                out: Varnode::unique(0x200, 8),
+                input: Varnode::unique(0x20a, 8),
+            },
+            PcodeOp::BranchInd {
+                dest: Varnode::ram(0x200, 8),
+            },
+        ];
+
+        optimize(&mut ops);
+
+        assert_eq!(
+            ops,
+            vec![
+                PcodeOp::IntAdd {
+                    out: Varnode::unique(0x200, 8),
+                    left: Varnode::register(0x10, 8),
+                    right: Varnode::constant(0x28, 8),
+                },
+                PcodeOp::BranchInd {
+                    dest: Varnode::ram(0x200, 8),
+                },
+            ]
         );
     }
 }
