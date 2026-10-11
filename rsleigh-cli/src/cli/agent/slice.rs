@@ -82,12 +82,14 @@ pub(super) fn run(data: &[u8], args: &[String]) -> Result<u8, AgentError> {
             let total = instructions.len();
             let evidence:Vec<_>=instructions.into_iter().take(AGENT_CARD_MAX_INSTRUCTIONS).map(|i|
                 json!({"address":format!("0x{:x}",i.address),"length":i.len,"disassembly":i.disassembly,"constructor":i.constructor})).collect();
-            emit(
-                &json!({"schema":"rsleigh.ssa-slice/v3","status":status,"error":"analysis execution limit reached",
+            let mut payload = json!({"schema":"rsleigh.ssa-slice/v3","status":status,"error":"analysis execution limit reached",
                 "file_sha256":compute_sha256(data),"function_address":format!("0x{address:x}"),"tool_version":env!("CARGO_PKG_VERSION"),
                 "selector":selector,"slice":Value::Null,"diagnostics":diagnostics,"metrics":metrics,
-                "evidence":{"instructions":evidence,"decoded_total":total,"truncated":total>AGENT_CARD_MAX_INSTRUCTIONS}}),
-            );
+                "evidence":{"instructions":evidence,"decoded_total":total,"truncated":total>AGENT_CARD_MAX_INSTRUCTIONS}});
+            if status == "failed" {
+                payload["error_code"] = json!("execution_limit");
+            }
+            emit(&payload);
             return Ok(status_exit(status));
         }
     };
@@ -113,7 +115,8 @@ pub(super) fn run(data: &[u8], args: &[String]) -> Result<u8, AgentError> {
             emit(&json!({"schema":"rsleigh.ssa-slice/v3","status":"failed",
                 "file_sha256":compute_sha256(data),"function_address":format!("0x{address:x}"),
                 "tool_version":env!("CARGO_PKG_VERSION"),"snapshot":"post-fold/v3",
-                "selector":selector,"selection_error":error,"error":error.message,"metrics":metrics}));
+                "selector":selector,"selection_error":error,"error":error.message,
+                "error_code":"invalid_selector","metrics":metrics}));
             return Ok(1);
         }
     };

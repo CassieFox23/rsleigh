@@ -9,6 +9,7 @@ pub mod cfg;
 // concrete to enforce.
 pub mod antidebug_timing;
 pub mod api_resolver;
+pub mod budget;
 #[cfg(feature = "experimental")]
 pub mod cpp_class;
 pub mod crypto_constants;
@@ -16,8 +17,8 @@ pub mod dominators;
 pub mod dwarf;
 pub mod eh_frame;
 pub mod eqsat;
-pub mod fold;
 pub mod finding;
+pub mod fold;
 pub mod function_summary;
 pub mod go_pclntab;
 pub mod handler_summary;
@@ -25,8 +26,8 @@ pub mod imports;
 pub mod iot_capabilities;
 pub mod iot_family;
 pub mod ir;
-pub mod memory;
 pub mod jmp_rax_trampoline;
+pub mod memory;
 pub mod opaque_pred;
 pub mod pdb_info;
 pub mod peb_walk;
@@ -46,10 +47,9 @@ mod signatures_libc;
 mod signatures_msvcrt;
 mod signatures_python;
 mod signatures_win32;
+pub mod slice;
 pub mod smt_explore;
 pub mod smt_verify;
-pub mod slice;
-pub mod budget;
 pub mod ssa;
 pub mod structure;
 pub mod syscall_table;
@@ -136,8 +136,19 @@ pub fn decompile_with_binary(
     binary: Option<&[u8]>,
     binary_path: Option<&Path>,
 ) -> String {
+    decompile_with_diagnostics(arch, instructions, binary, binary_path).0
+}
+
+/// [`decompile_with_binary`], also returning the approximations recorded by
+/// CFG construction, SSA, and folding (unresolved jumps, tail calls, ...).
+pub fn decompile_with_diagnostics(
+    arch: Architecture,
+    instructions: &[(u64, Instruction)],
+    binary: Option<&[u8]>,
+    binary_path: Option<&Path>,
+) -> (String, Vec<ir::Diagnostic>) {
     if instructions.is_empty() {
-        return "// empty function\n".to_string();
+        return ("// empty function\n".to_string(), Vec::new());
     }
 
     // Pass instructions through unchanged — intra-instruction CBranch (CSEL/CMOV)
@@ -146,7 +157,7 @@ pub fn decompile_with_binary(
 
     let cfg = cfg::build_cfg(&expanded);
     if cfg.blocks.is_empty() {
-        return "// no blocks\n".to_string();
+        return ("// no blocks\n".to_string(), cfg.diagnostics);
     }
 
     let import_map = binary
@@ -303,7 +314,7 @@ pub fn decompile_with_binary(
     let try_regions = try_regions_map.get(&func_addr).unwrap_or(&empty_regions);
 
     let structured = structure::recover_structure(&ssa, &cfg);
-    printer::print_c_with_try(
+    let text = printer::print_c_with_try(
         &structured,
         &ssa,
         arch,
@@ -313,7 +324,30 @@ pub fn decompile_with_binary(
         &struct_fields,
         &func_name,
         try_regions,
-    )
+    );
+    // Code after a return in a linear decode window is often padding or the
+    // next function; its unresolved edges say nothing about this function.
+    let mut reachable = vec![false; cfg.blocks.len()];
+    let mut stack = vec![cfg.entry];
+    while let Some(block) = stack.pop() {
+        if block.0 < reachable.len() && !std::mem::replace(&mut reachable[block.0], true) {
+            stack.extend(cfg.successors(block));
+        }
+    }
+    let live: std::collections::HashSet<u64> = cfg
+        .blocks
+        .iter()
+        .filter(|b| reachable[b.id.0])
+        .flat_map(|b| {
+            let jump = b.terminator_origin.as_ref().map(|o| o.instruction_address);
+            std::iter::once(b.addr)
+                .chain(jump)
+                .chain(b.ops.iter().map(|(a, _)| *a))
+        })
+        .collect();
+    let mut diagnostics = ssa.diagnostics;
+    diagnostics.retain(|d| d.addr.is_none_or(|a| live.contains(&a)));
+    (text, diagnostics)
 }
 
 /// Learned type information for a function, extracted after decompilation.

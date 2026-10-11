@@ -45,12 +45,32 @@ pub fn print_c_with_try(
     try_regions: &[crate::eh_frame::TryRegion],
 ) -> String {
     let mut out = String::new();
-    let ctx = PrintCtx {
+    let mut ctx = PrintCtx {
         arch,
         binary,
         imports,
         try_regions,
+        register_params: Vec::new(),
     };
+    for v in &ssa.vars {
+        let Some(name) = v.param_name.as_ref().filter(|n| n.starts_with("param_")) else {
+            continue;
+        };
+        if v.varnode.space != AddressSpaceId::Register
+            || v.call_return
+            || !v.origins.operations.is_empty()
+            || !matches!(v.expr, Expr::Unknown)
+        {
+            continue;
+        }
+        for size in [8u32, 4] {
+            let reg = var_name(&Varnode { size, ..v.varnode }, &ctx);
+            if !ctx.register_params.iter().any(|(r, _)| *r == reg) {
+                ctx.register_params.push((reg, name.clone()));
+            }
+        }
+    }
+    let ctx = ctx;
 
     // Generate function signature from SSA analysis
     generate_function_signature(&mut out, ssa, func_name);
@@ -291,6 +311,24 @@ fn print_stmts_with_tracker(
     for (i, stmt) in stmts.iter().enumerate() {
         print_stmt_tracked(stmt, stmts, i, ssa, ctx, indent, out, &mut tracker);
     }
+}
+
+/// Replace `pattern` (a register spelling followed by punctuation) where
+/// the register name is not the tail of a longer identifier.
+fn replace_register(line: &str, pattern: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find(pattern) {
+        let bounded = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        out.push_str(&rest[..at]);
+        out.push_str(if bounded { replacement } else { pattern });
+        rest = &rest[at + pattern.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Text-level post-processing to clean up common patterns.
@@ -1078,24 +1116,15 @@ fn post_process(
     }
 
     // Replace register names before -> with parameter names in struct accesses.
-    // RAX->field4 → a->field4 when a is a known parameter.
-    // Different registers map to different params by occurrence order.
-    if !param_names.is_empty() {
-        for line in &mut lines {
-            if !line.contains("->") {
-                continue;
-            }
-            let mut param_idx = 0;
-            let reg_names = ["RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9"];
-            for reg in &reg_names {
-                let arrow = format!("{}->", reg);
-                while line.contains(&arrow) && param_idx < param_names.len() {
-                    crate::budget::work("render", 0);
-                    let replacement = format!("{}->", param_names[param_idx]);
-                    *line = line.replacen(&arrow, &replacement, 1);
-                    param_idx += 1;
-                }
-            }
+    // RSI->field4 → param_1->field4 when RSI still names the incoming
+    // parameter; other registers hold locals and keep their own names.
+    for line in &mut lines {
+        if !line.contains("->") {
+            continue;
+        }
+        for (reg, name) in &ctx.register_params {
+            crate::budget::work("render", 0);
+            *line = replace_register(line, &format!("{reg}->"), &format!("{name}->"));
         }
     }
 
@@ -1401,19 +1430,9 @@ fn post_process(
             if line.contains("<< 24") || line.contains("<< 16") || line.contains("<< 8") {
                 continue;
             }
-            let reg_names = [
-                "RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9", "EAX", "ECX", "EDX", "EBX",
-                "ESI", "EDI",
-            ];
-            let mut param_idx = 0;
-            for reg in &reg_names {
-                let deref = format!("*({})", reg);
-                while line.contains(&deref) && param_idx < param_names.len() {
-                    crate::budget::work("render", 0);
-                    let replacement = format!("*({})", param_names[param_idx]);
-                    *line = line.replacen(&deref, &replacement, 1);
-                    param_idx += 1;
-                }
+            for (reg, name) in &ctx.register_params {
+                crate::budget::work("render", 0);
+                *line = line.replace(&format!("*({reg})"), &format!("*({name})"));
             }
         }
     }
@@ -6360,6 +6379,31 @@ fn post_process(
                 lines.remove(i + 1);
                 lines[i] = lines[i].replace("} else {", "}");
                 continue;
+            }
+            i += 1;
+        }
+    }
+
+    // #VOID_TAIL_CALL: a void function cannot return its callee's result;
+    // print the tail call as a statement followed by a plain return.
+    if lines
+        .first()
+        .map_or(false, |l| l.trim().starts_with("void "))
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let t = lines[i].trim();
+            if let Some(call) = t.strip_prefix("return ").and_then(|r| r.strip_suffix(';')) {
+                if call.ends_with(')')
+                    && (call.starts_with("(*") || !call.starts_with('('))
+                    && call.contains('(')
+                {
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let pad = lines[i][..indent].to_string();
+                    lines[i] = format!("{pad}{call};");
+                    lines.insert(i + 1, format!("{pad}return;"));
+                    i += 1;
+                }
             }
             i += 1;
         }
@@ -13970,6 +14014,9 @@ struct PrintCtx<'a> {
     binary: Option<&'a [u8]>,
     imports: &'a HashMap<u64, String>,
     try_regions: &'a [crate::eh_frame::TryRegion],
+    /// Register spellings whose entry value is a named parameter
+    /// (`RSI`/`ESI` → `param_1`); text rules may rename only these.
+    register_params: Vec<(String, String)>,
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
@@ -14517,6 +14564,26 @@ impl RegTracker {
     }
 }
 
+/// True when the statements after `stmts[idx]` return `var` with nothing
+/// visible in between (only temporaries and flags).
+fn next_returns(stmts: &[StructuredStmt], idx: usize, var: VarId, ssa: &SsaCfg) -> bool {
+    for stmt in &stmts[idx + 1..] {
+        match stmt {
+            StructuredStmt::Return(Some(v)) => return *v == var,
+            StructuredStmt::Assign { lhs, .. } => {
+                let v = ssa.var(*lhs);
+                let hidden = v.varnode.space == AddressSpaceId::Unique
+                    || (v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset));
+                if !hidden {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn print_stmt_tracked(
     stmt: &StructuredStmt,
     stmts: &[StructuredStmt],
@@ -15036,6 +15103,15 @@ fn print_stmt_tracked(
             // Calls clobber all registers
             tracker.invalidate_all();
 
+            // `call f; ret` and tail calls hand the callee's result straight
+            // back. The result has no expression of its own (it would print
+            // as `return ?;`), so name the call in the return.
+            if call_out.is_some_and(|v| next_returns(stmts, stmt_idx, v, ssa)) {
+                out.push_str(&format!("{}return {};\n", pad, call_expr));
+                tracker.set_call_return(0, 0, "<<returned>>".to_string());
+                return;
+            }
+
             if let Some(out_var) = call_out {
                 // Use format_var to get the proper name (param_name > register name).
                 // This ensures "len = strlen(str);" rather than "RAX = strlen(str);"
@@ -15170,6 +15246,13 @@ fn print_stmt_tracked(
                     } else {
                         format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
                     }
+                } else if let Expr::Phi(inputs) = &vdef.expr {
+                    // A join of the values the predecessors assigned: return
+                    // the variable they assign, not one arm's value.
+                    inputs
+                        .iter()
+                        .find_map(|i| resolve_to_named_var(*i, ssa, 4))
+                        .unwrap_or_else(|| format_var(*v, ssa, ctx))
                 } else {
                     format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
                 };
@@ -16129,7 +16212,13 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             }
         }
         Expr::Ternary(cond, then_val, else_val) => {
-            let c = format_var_tracked(*cond, ssa, ctx, tracker);
+            // A flag selector (`ZF`) renders as the comparison that set it.
+            let cv = ssa.var(*cond);
+            let c = if cv.varnode.space == AddressSpaceId::Register && is_flag(cv.varnode.offset) {
+                format_condition_tracked(*cond, ssa, ctx, tracker)
+            } else {
+                format_var_tracked(*cond, ssa, ctx, tracker)
+            };
             let t = format_var_tracked(*then_val, ssa, ctx, tracker);
             let e = format_var_tracked(*else_val, ssa, ctx, tracker);
             format!("({}) ? {} : {}", c, t, e)
@@ -17078,7 +17167,11 @@ fn rewrite_scaled_loop_derefs(line: &mut String, aliases: &HashMap<String, Strin
             search_from = close + 1;
             continue;
         };
-        if idx == ind || idx.starts_with("lVar") || idx.starts_with("iVar") || idx.starts_with("uVar") {
+        if idx == ind
+            || idx.starts_with("lVar")
+            || idx.starts_with("iVar")
+            || idx.starts_with("uVar")
+        {
             let replacement = format!("*({} + {} * {})", replacement_base, ind, scale);
             *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
             search_from = star_pos + replacement.len();
@@ -17133,9 +17226,7 @@ fn rewrite_loop_alias_fields(
             let pos = search_from + rel;
             let field_start = pos + pat.len();
             let mut field_end = field_start;
-            while field_end < line.len()
-                && line.as_bytes()[field_end].is_ascii_hexdigit()
-            {
+            while field_end < line.len() && line.as_bytes()[field_end].is_ascii_hexdigit() {
                 field_end += 1;
             }
             if field_end == field_start {
@@ -17213,7 +17304,10 @@ fn fold_loop_accumulator_updates(lines: &mut Vec<String>, start: usize, end: &mu
         let pad = " ".repeat(indent);
         let op1 = if op1 == '+' { "+" } else { "-" };
         let op2 = if op2 == '+' { "+" } else { "-" };
-        lines[i] = format!("{}{} = {} {} {} {} {};", pad, lhs1, lhs1, op1, rhs1, op2, rhs2);
+        lines[i] = format!(
+            "{}{} = {} {} {} {} {};",
+            pad, lhs1, lhs1, op1, rhs1, op2, rhs2
+        );
         lines.remove(i + 1);
         *end -= 1;
     }
@@ -17264,11 +17358,9 @@ fn recover_counted_loop_body_exprs(lines: &mut Vec<String>) {
         while j < end {
             crate::budget::work("render", 0);
             let remove = if let Some((lhs, rhs)) = parse_plain_assignment(&lines[j]) {
-                aliases
-                    .get(lhs)
-                    .map_or(false, |base| {
-                        base == rhs && !alias_used_in_range(lines, i + 1, end, j, lhs, base)
-                    })
+                aliases.get(lhs).map_or(false, |base| {
+                    base == rhs && !alias_used_in_range(lines, i + 1, end, j, lhs, base)
+                })
             } else {
                 false
             };
@@ -17711,9 +17803,17 @@ fn copied_parameter_name(mut id: VarId, ssa: &SsaCfg) -> Option<&str> {
     for _ in 0..64 {
         crate::budget::work("render", 0);
         let var = ssa.var(id);
-        if var.call_return { return None; }
-        if let Some(name) = var.param_name.as_deref() { return Some(name); }
-        if let Expr::Var(source) = var.expr { id = source; } else { return None; }
+        if var.call_return {
+            return None;
+        }
+        if let Some(name) = var.param_name.as_deref() {
+            return Some(name);
+        }
+        if let Expr::Var(source) = var.expr {
+            id = source;
+        } else {
+            return None;
+        }
     }
     None
 }
@@ -18043,10 +18143,19 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                 return format_var(inputs[0], ssa, ctx);
             }
             let args: Vec<String> = inputs.iter().map(|i| format_var(*i, ssa, ctx)).collect();
+            // Versions of one location that print alike are that location.
+            if args.iter().all(|a| *a == args[0]) {
+                return args[0].clone();
+            }
             format!("phi({})", args.join(", "))
         }
         Expr::Ternary(cond, then_val, else_val) => {
-            let c = format_var(*cond, ssa, ctx);
+            let cv = ssa.var(*cond);
+            let c = if cv.varnode.space == AddressSpaceId::Register && is_flag(cv.varnode.offset) {
+                format_condition(*cond, ssa, ctx)
+            } else {
+                format_var(*cond, ssa, ctx)
+            };
             let t = format_var(*then_val, ssa, ctx);
             let e = format_var(*else_val, ssa, ctx);
             format!("({}) ? {} : {}", c, t, e)
@@ -19354,8 +19463,20 @@ mod dependency_render_tests {
     fn call_assignment_survives_a_branch_boundary_and_later_use() {
         let mut output = "int f(int n) {\nif (n > 1) {\n    RAX = helper(n - 1);\n} else {\n    var_4 = 1;\n}\nreturn RAX * 2;\n".to_string();
         let imports = HashMap::new();
-        let context = PrintCtx { arch: Architecture::X86_64, binary: None, imports: &imports, try_regions: &[] };
-        post_process(&mut output, &HashMap::new(), &["n".into()], &HashMap::new(), &context);
+        let context = PrintCtx {
+            arch: Architecture::X86_64,
+            binary: None,
+            imports: &imports,
+            try_regions: &[],
+            register_params: Vec::new(),
+        };
+        post_process(
+            &mut output,
+            &HashMap::new(),
+            &["n".into()],
+            &HashMap::new(),
+            &context,
+        );
         assert_eq!(output.matches("helper(n - 1)").count(), 1, "{output}");
     }
 
@@ -19368,12 +19489,19 @@ mod dependency_render_tests {
         let mut instructions = vec![];
         let mut offset = 0;
         while offset < bytes.len() {
-            let instruction = decoder.decode(&bytes[offset..], 0x1000 + offset as u64).unwrap();
+            let instruction = decoder
+                .decode(&bytes[offset..], 0x1000 + offset as u64)
+                .unwrap();
             let length = instruction.len as usize;
             instructions.push((0x1000 + offset as u64, instruction));
             offset += length;
         }
         let output = crate::decompile(Architecture::X86_64, &instructions);
-        assert!(output.lines().any(|line| line.contains("return") && line.contains("param_0") && line.contains("param_1")), "{output}");
+        assert!(
+            output.lines().any(|line| line.contains("return")
+                && line.contains("param_0")
+                && line.contains("param_1")),
+            "{output}"
+        );
     }
 }

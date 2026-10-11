@@ -42,7 +42,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     leaders.push(dest.offset);
                     leaders.push(next_addr);
                 }
-                PcodeOp::Branch { .. } => {
+                PcodeOp::Branch { .. } | PcodeOp::BranchInd { .. } => {
                     leaders.push(next_addr);
                 }
                 PcodeOp::Call { dest } if dest.space == AddressSpaceId::Ram => {
@@ -67,34 +67,76 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
     let valid_addrs: std::collections::HashSet<u64> = inst_addrs.iter().copied().collect();
     leaders.retain(|a| valid_addrs.contains(a));
 
+    // Block ids follow `order`: the first instruction is the function entry
+    // and becomes block 0 even when detached fragments (GCC `.cold` parts)
+    // were decoded at lower addresses. Ranges still follow address order.
+    let entry_addr = instructions[0].0;
+    let order: Vec<u64> = std::iter::once(entry_addr)
+        .chain(leaders.iter().copied().filter(|&a| a != entry_addr))
+        .collect();
+
     // Map leader address -> block id
     let mut leader_to_block: HashMap<u64, BlockId> = HashMap::new();
-    for (i, &addr) in leaders.iter().enumerate() {
+    for (i, &addr) in order.iter().enumerate() {
         leader_to_block.insert(addr, BlockId(i));
     }
 
+    // Byte ranges covered by decoded instructions. A jump into one of them
+    // that is not an instruction start stays unresolved; a jump outside all
+    // of them leaves the body and is modeled as a tail call.
+    let mut covered: Vec<(u64, u64)> = instructions.iter().map(|(a, i)| (*a, a + i.len)).collect();
+    covered.sort_unstable();
+    let is_covered = |target: u64| {
+        let i = covered.partition_point(|&(start, _)| start <= target);
+        i > 0 && target < covered[i - 1].1
+    };
+    // Tail calls continue into synthetic blocks appended after the real ones:
+    // (address of the jump, terminator).
+    let mut synthetic: Vec<(u64, Terminator)> = Vec::new();
+    let first_synthetic = order.len();
+    let tail_call = |synthetic: &mut Vec<(u64, Terminator)>, at: u64, target: CallTarget| {
+        let ret = BlockId(first_synthetic + synthetic.len());
+        synthetic.push((at, Terminator::Return));
+        Terminator::Call {
+            target,
+            fallthrough: ret,
+        }
+    };
+
     // Build blocks
     let mut blocks: Vec<BasicBlock> = Vec::new();
-    let func_end = instructions.last().map(|(a, i)| a + i.len).unwrap_or(0);
+    let func_end = instructions
+        .iter()
+        .map(|(a, i)| a + i.len)
+        .max()
+        .unwrap_or(0);
 
-    for (block_idx, &leader_addr) in leaders.iter().enumerate() {
+    for (block_idx, &leader_addr) in order.iter().enumerate() {
         // Find the range of instructions in this block
-        let next_leader = leaders.get(block_idx + 1).copied().unwrap_or(func_end);
+        let next_leader = leaders
+            .get(leaders.partition_point(|&a| a <= leader_addr))
+            .copied()
+            .unwrap_or(func_end);
 
         let mut ops: Vec<(u64, PcodeOp)> = Vec::new();
         let mut last_inst_addr = leader_addr;
         let mut last_inst_len = 0u64;
 
-        for (addr, inst) in instructions {
+        let mut members: Vec<&(u64, Instruction)> = Vec::new();
+        for entry in instructions {
             crate::budget::work("cfg", 1);
-            if *addr >= leader_addr && *addr < next_leader {
-                for op in &inst.ops {
-                    crate::budget::work("cfg", 1);
-                    ops.push((*addr, op.clone()));
-                }
-                last_inst_addr = *addr;
-                last_inst_len = inst.len;
+            if entry.0 >= leader_addr && entry.0 < next_leader {
+                members.push(entry);
             }
+        }
+        members.sort_by_key(|(addr, _)| *addr);
+        for (addr, inst) in members {
+            for op in &inst.ops {
+                crate::budget::work("cfg", 1);
+                ops.push((*addr, op.clone()));
+            }
+            last_inst_addr = *addr;
+            last_inst_len = inst.len;
         }
 
         let next_inst_addr = last_inst_addr + last_inst_len;
@@ -102,13 +144,19 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         // Only suffixes are removed below, so surviving operation indices stay
         // equal to raw instruction indices. Capture control evidence first.
         let terminator_origin = ops.last().and_then(|(address, op)| {
-            matches!(op, PcodeOp::Return { .. } | PcodeOp::Branch { .. }
-                | PcodeOp::CBranch { .. } | PcodeOp::BranchInd { .. }
-                | PcodeOp::Call { .. } | PcodeOp::CallInd { .. })
-                .then(|| crate::provenance::OperationOrigin {
-                    instruction_address: *address,
-                    operation_index: ops.iter().rev().take_while(|(a, _)| a == address).count() - 1,
-                })
+            matches!(
+                op,
+                PcodeOp::Return { .. }
+                    | PcodeOp::Branch { .. }
+                    | PcodeOp::CBranch { .. }
+                    | PcodeOp::BranchInd { .. }
+                    | PcodeOp::Call { .. }
+                    | PcodeOp::CallInd { .. }
+            )
+            .then(|| crate::provenance::OperationOrigin {
+                instruction_address: *address,
+                operation_index: ops.iter().rev().take_while(|(a, _)| a == address).count() - 1,
+            })
         });
 
         // Determine terminator from the last op
@@ -125,6 +173,14 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     ops.pop();
                     if let Some(&bid) = leader_to_block.get(&target) {
                         Terminator::Branch(bid)
+                    } else if !is_covered(target) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Info,
+                            kind: DiagKind::TailCall,
+                            addr: Some(last_inst_addr),
+                            detail: format!("Branch to {:#x} leaves the body; tail call", target),
+                        });
+                        tail_call(&mut synthetic, last_inst_addr, CallTarget::Direct(target))
                     } else {
                         diagnostics.push(Diagnostic {
                             severity: Severity::Warn,
@@ -146,6 +202,32 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                             taken,
                             fallthrough,
                         },
+                        // Conditional tail call (`jne other_function`): the
+                        // taken edge runs a synthetic call-then-return block.
+                        (None, Some(fallthrough)) if !is_covered(target) => {
+                            diagnostics.push(Diagnostic {
+                                severity: Severity::Info,
+                                kind: DiagKind::TailCall,
+                                addr: Some(last_inst_addr),
+                                detail: format!(
+                                    "CBranch to {:#x} leaves the body; conditional tail call",
+                                    target
+                                ),
+                            });
+                            let taken = BlockId(first_synthetic + synthetic.len());
+                            synthetic.push((last_inst_addr, Terminator::Return));
+                            let call = tail_call(
+                                &mut synthetic,
+                                last_inst_addr,
+                                CallTarget::Direct(target),
+                            );
+                            synthetic[taken.0 - first_synthetic].1 = call;
+                            Terminator::CBranch {
+                                cond,
+                                taken,
+                                fallthrough,
+                            }
+                        }
                         (taken, fallthrough) => {
                             diagnostics.push(Diagnostic {
                                 severity: Severity::Warn,
@@ -193,7 +275,29 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                         && matches!(dest_vn.offset, 88 | 240);
                     if is_stack_return || is_bx_lr {
                         Terminator::Return
+                    } else if let Some(target) =
+                        indirect_jump_tail_target(&mut ops, dest_vn, last_inst_addr)
+                    {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Info,
+                            kind: DiagKind::TailCall,
+                            addr: Some(last_inst_addr),
+                            detail: format!(
+                                "indirect jump via {:?} treated as a tail call",
+                                target
+                            ),
+                        });
+                        tail_call(&mut synthetic, last_inst_addr, target)
                     } else {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Warn,
+                            kind: DiagKind::UnrecoveredIndirectJump,
+                            addr: Some(last_inst_addr),
+                            detail: format!(
+                                "indirect jump via {:?} computes its target; successors not recovered",
+                                dest_vn
+                            ),
+                        });
                         Terminator::Indirect(dest_vn)
                     }
                 }
@@ -206,10 +310,18 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     ops.pop();
                     // Strip x86-32 return address push (IntSub ESP + Store [ESP])
                     strip_call_push_ops(&mut ops);
+                    // No decoded successor (noreturn callee, end of window):
+                    // control stops here rather than looping on the call.
                     let fallthrough = leader_to_block
                         .get(&next_inst_addr)
                         .copied()
-                        .unwrap_or(BlockId(block_idx));
+                        .unwrap_or_else(|| {
+                            synthetic.push((
+                                last_inst_addr,
+                                Terminator::Indirect(Varnode::constant(0, 8)),
+                            ));
+                            BlockId(first_synthetic + synthetic.len() - 1)
+                        });
                     Terminator::Call {
                         target,
                         fallthrough,
@@ -239,10 +351,18 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     ops.pop();
                     // Strip x86-32 return address push (IntSub ESP + Store [ESP])
                     strip_call_push_ops(&mut ops);
+                    // No decoded successor (noreturn callee, end of window):
+                    // control stops here rather than looping on the call.
                     let fallthrough = leader_to_block
                         .get(&next_inst_addr)
                         .copied()
-                        .unwrap_or(BlockId(block_idx));
+                        .unwrap_or_else(|| {
+                            synthetic.push((
+                                last_inst_addr,
+                                Terminator::Indirect(Varnode::constant(0, 8)),
+                            ));
+                            BlockId(first_synthetic + synthetic.len() - 1)
+                        });
                     Terminator::Call {
                         target,
                         fallthrough,
@@ -269,12 +389,140 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
             terminator,
         });
     }
+    for (offset, (addr, terminator)) in synthetic.into_iter().enumerate() {
+        blocks.push(BasicBlock {
+            terminator_origin: None,
+            id: BlockId(first_synthetic + offset),
+            addr,
+            ops: Vec::new(),
+            terminator,
+        });
+    }
 
     Cfg {
         entry: BlockId(0),
         blocks,
         diagnostics,
     }
+}
+
+/// Index of the last op in `ops[..end]` that writes `vn`.
+fn producer(ops: &[(u64, PcodeOp)], end: usize, vn: Varnode) -> Option<usize> {
+    ops[..end].iter().rposition(|(_, op)| {
+        pcode_ir::get_output(op).is_some_and(|o| o.space == vn.space && o.offset == vn.offset)
+    })
+}
+
+/// True when `vn` at `ops[..end]` is a constant, possibly copied or extended.
+fn constant_derived(ops: &[(u64, PcodeOp)], end: usize, vn: Varnode, depth: usize) -> bool {
+    if vn.space == AddressSpaceId::Const {
+        return true;
+    }
+    if depth > 4 {
+        return false;
+    }
+    match producer(ops, end, vn).map(|d| (d, &ops[d].1)) {
+        Some((
+            d,
+            PcodeOp::Copy { input, .. }
+            | PcodeOp::IntSext { input, .. }
+            | PcodeOp::IntZext { input, .. }
+            | PcodeOp::Subpiece { input, .. },
+        )) => constant_derived(ops, d, *input, depth + 1),
+        _ => false,
+    }
+}
+
+/// True when the value written by `ops[def]` is derived by scaling an index
+/// or adding two non-constant values: the shape of jump-table dispatch.
+fn computes_index(ops: &[(u64, PcodeOp)], def: usize, depth: usize) -> bool {
+    if depth > 6 {
+        return false;
+    }
+    let inputs = match &ops[def].1 {
+        PcodeOp::IntMult { .. } | PcodeOp::IntLsl { .. } => return true,
+        PcodeOp::IntAdd { left, right, .. } => {
+            if !constant_derived(ops, def, *left, 0) && !constant_derived(ops, def, *right, 0) {
+                return true;
+            }
+            vec![*left, *right]
+        }
+        PcodeOp::Copy { input, .. }
+        | PcodeOp::IntSext { input, .. }
+        | PcodeOp::IntZext { input, .. } => vec![*input],
+        PcodeOp::Load { ptr, .. } => vec![*ptr],
+        _ => return false,
+    };
+    inputs
+        .into_iter()
+        .any(|vn| producer(ops, def, vn).is_some_and(|d| computes_index(ops, d, depth + 1)))
+}
+
+/// The call target of an indirect jump that transfers to another function,
+/// or `None` when the target is computed (jump-table dispatch).
+///
+/// Tail calls are `JMP [slot]` (PLT/IAT thunks), jumps through a pointer read
+/// from `[reg + disp]`, and jumps to a register holding such a pointer.
+/// x86 lifts `JMP [expr]` as `BranchInd` on a Ram varnode: at a constant
+/// address that varnode is the slot itself; when its offset names a unique
+/// computed in this block, the address is dynamic and the pointer load is
+/// materialized here so the call has a value to call through.
+fn indirect_jump_tail_target(
+    ops: &mut Vec<(u64, PcodeOp)>,
+    dest: Varnode,
+    at: u64,
+) -> Option<CallTarget> {
+    if dest.space == AddressSpaceId::Ram {
+        let address = Varnode {
+            space: AddressSpaceId::Unique,
+            ..dest
+        };
+        let Some(def) = producer(ops, ops.len(), address) else {
+            return Some(CallTarget::Direct(dest.offset));
+        };
+        if computes_index(ops, def, 0) {
+            return None;
+        }
+        let pointer = Varnode {
+            space: AddressSpaceId::Unique,
+            offset: dest.offset | (1 << 62),
+            size: dest.size,
+        };
+        ops.push((
+            at,
+            PcodeOp::Load {
+                out: pointer,
+                space: AddressSpaceId::Ram,
+                ptr: address,
+            },
+        ));
+        return Some(CallTarget::Indirect(pointer));
+    }
+    let (mut vn, mut end) = (dest, ops.len());
+    for _ in 0..8 {
+        let Some(def) = producer(ops, end, vn) else {
+            // Defined before this block: a register-held function pointer.
+            return Some(CallTarget::Indirect(dest));
+        };
+        match &ops[def].1 {
+            PcodeOp::Copy { input, .. }
+            | PcodeOp::IntZext { input, .. }
+            | PcodeOp::IntSext { input, .. } => {
+                if input.space == AddressSpaceId::Const {
+                    return Some(CallTarget::Direct(input.offset));
+                }
+                (vn, end) = (*input, def);
+            }
+            PcodeOp::Load { ptr, .. } if ptr.space == AddressSpaceId::Const => {
+                return Some(CallTarget::Direct(ptr.offset));
+            }
+            PcodeOp::Load { .. } if !computes_index(ops, def, 0) => {
+                return Some(CallTarget::Indirect(dest));
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// x86-32 ESP register: offset 16, size 4.
@@ -988,5 +1236,158 @@ mod tests {
         ] {
             assert!(edges.iter().any(|edge| edge.kind == kind), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn slot_jump_is_a_tail_call_and_ends_the_block() {
+        // PLT stub: `jmp [slot]`, then the lazy-binding `push; jmp plt0`.
+        let cfg = build_cfg(&[
+            (
+                0x1000,
+                inst(
+                    6,
+                    vec![PcodeOp::BranchInd {
+                        dest: Varnode::ram(0x3000, 8),
+                    }],
+                ),
+            ),
+            (0x1006, inst(5, vec![])),
+            (
+                0x100b,
+                inst(
+                    5,
+                    vec![PcodeOp::Branch {
+                        dest: Varnode::ram(0x800, 8),
+                    }],
+                ),
+            ),
+        ]);
+        let Terminator::Call {
+            target: CallTarget::Direct(0x3000),
+            fallthrough,
+        } = cfg.blocks[0].terminator
+        else {
+            panic!(
+                "expected tail call through the slot: {:?}",
+                cfg.blocks[0].terminator
+            );
+        };
+        assert!(matches!(
+            cfg.blocks[fallthrough.0].terminator,
+            Terminator::Return
+        ));
+        assert!(cfg.diagnostics.iter().any(|d| d.kind == DiagKind::TailCall));
+    }
+
+    #[test]
+    fn computed_indirect_jump_stays_unrecovered() {
+        // `jmp [table + rax*8]`: a scaled index selects the target.
+        let scaled = Varnode {
+            space: AddressSpaceId::Unique,
+            offset: 0x100,
+            size: 8,
+        };
+        let address = Varnode {
+            space: AddressSpaceId::Unique,
+            offset: 0x108,
+            size: 8,
+        };
+        let cfg = build_cfg(&[(
+            0x1000,
+            inst(
+                7,
+                vec![
+                    PcodeOp::IntMult {
+                        out: scaled,
+                        left: Varnode::register(0, 8),
+                        right: Varnode::constant(8, 8),
+                    },
+                    PcodeOp::IntAdd {
+                        out: address,
+                        left: scaled,
+                        right: Varnode::constant(0x4000, 8),
+                    },
+                    PcodeOp::BranchInd {
+                        dest: Varnode::ram(0x108, 8),
+                    },
+                ],
+            ),
+        )]);
+        assert!(matches!(cfg.blocks[0].terminator, Terminator::Indirect(_)));
+        assert!(cfg
+            .diagnostics
+            .iter()
+            .any(|d| d.kind == DiagKind::UnrecoveredIndirectJump));
+    }
+
+    #[test]
+    fn jump_out_of_the_body_is_a_tail_call() {
+        let cfg = build_cfg(&[
+            (
+                0x1000,
+                inst(
+                    5,
+                    vec![PcodeOp::Branch {
+                        dest: Varnode::ram(0x5000, 8),
+                    }],
+                ),
+            ),
+            (0x1005, inst(1, vec![])),
+        ]);
+        assert!(matches!(
+            cfg.blocks[0].terminator,
+            Terminator::Call {
+                target: CallTarget::Direct(0x5000),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn entry_stays_block_zero_when_a_fragment_lies_below_it() {
+        // GCC places `foo.cold` below `foo`; the entry is still `foo`.
+        let cfg = build_cfg(&[
+            (
+                0x2000,
+                inst(
+                    5,
+                    vec![PcodeOp::Branch {
+                        dest: Varnode::ram(0x1000, 8),
+                    }],
+                ),
+            ),
+            (
+                0x1000,
+                inst(
+                    1,
+                    vec![PcodeOp::Return {
+                        dest: Varnode::register(0x288, 8),
+                    }],
+                ),
+            ),
+        ]);
+        assert_eq!(cfg.entry, BlockId(0));
+        assert_eq!(cfg.blocks[0].addr, 0x2000);
+        let Terminator::Branch(fragment) = cfg.blocks[0].terminator else {
+            panic!("expected a branch into the fragment");
+        };
+        assert_eq!(cfg.blocks[fragment.0].addr, 0x1000);
+    }
+
+    #[test]
+    fn call_without_decoded_successor_does_not_loop() {
+        let cfg = build_cfg(&[(
+            0x1000,
+            inst(
+                5,
+                vec![PcodeOp::Call {
+                    dest: Varnode::ram(0x9000, 8),
+                }],
+            ),
+        )]);
+        let Terminator::Call { fallthrough, .. } = cfg.blocks[0].terminator else {
+            panic!("expected a call");
+        };
+        assert_ne!(fallthrough, BlockId(0));
     }
 }

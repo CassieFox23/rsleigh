@@ -39,10 +39,19 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
         mut diagnostics,
     } = prepared;
     if instructions.is_empty() {
-        let error = "no decodable instructions at requested address";
-        diagnostics.push(diagnostic("decode", "no_instructions", error));
+        // A stop before the first decode is not evidence that the address is bad.
+        let (error_code, error) = if diagnostics.iter().any(|d| d["code"] == "execution_limit") {
+            (
+                "execution_limit",
+                "execution limit reached before any instruction was decoded",
+            )
+        } else {
+            let error = "no decodable instructions at requested address";
+            diagnostics.push(diagnostic("decode", "no_instructions", error));
+            ("analysis_failed", error)
+        };
         emit(
-            &json!({"schema":"rsleigh.card/v2", "status":"failed", "error":error,
+            &json!({"schema":"rsleigh.card/v2", "status":"failed", "error":error, "error_code":error_code,
             "file":{"sha256":compute_sha256(data)}, "function":{"name":name,"address":format!("0x{address:x}")},
             "diagnostics":diagnostics, "metrics":metrics, "instructions":[], "operations":[]}),
         );
@@ -132,7 +141,7 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
         "schema":"rsleigh.card/v2", "status":status, "tool_version":env!("CARGO_PKG_VERSION"),
         "file":{"path":binary_path,"sha256":compute_sha256(data),"arch":format!("{arch:?}"),"imagebase":format!("0x{imagebase:x}")},
         "function":{"name":name,"address":format!("0x{address:x}"),
-            "size":instructions.last().map(|i| i.address + i.len - address).unwrap_or(0),
+            "size":instructions.iter().map(|i| i.len).sum::<u64>(),
             "complexity":1 + instructions.iter().flat_map(|i| &i.operations).filter(|o| matches!(o,pcode_ir::PcodeOp::CBranch{..})).count(),
             "calling_convention":agent_calling_convention(arch,&obj)},
         "imports":imports,"strings":strings,

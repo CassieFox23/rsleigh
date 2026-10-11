@@ -5062,8 +5062,42 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         return;
     }
 
-    let mut param_idx = 0u32;
-    let mut named_offsets = std::collections::HashSet::new();
+    // Fold runs this pass again after rewriting. Every entry read of an
+    // argument register is that register's parameter, however many SSA
+    // versions read it, so a later run keeps the earlier names and numbers
+    // new parameters after them.
+    let mut known: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    for v in &ssa.vars {
+        if let Some(name) = &v.param_name {
+            if name.starts_with("param_")
+                && v.varnode.space == AddressSpaceId::Register
+                && arg_reg_offsets().contains(&v.varnode.offset)
+            {
+                known
+                    .entry(v.varnode.offset)
+                    .or_insert_with(|| name.clone());
+            }
+        }
+    }
+    for v in ssa.vars.iter_mut() {
+        if v.param_name.is_none()
+            && !v.call_return
+            && v.origins.operations.is_empty()
+            && v.varnode.space == AddressSpaceId::Register
+            && matches!(v.expr, Expr::Unknown)
+        {
+            if let Some(name) = known.get(&v.varnode.offset) {
+                v.param_name = Some(name.clone());
+            }
+        }
+    }
+    let mut param_idx = known
+        .values()
+        .filter_map(|n| n.strip_prefix("param_")?.parse::<u32>().ok())
+        .map(|i| i + 1)
+        .max()
+        .unwrap_or(0);
+    let mut named_offsets: std::collections::HashSet<u64> = known.keys().copied().collect();
     let mut to_name: Vec<(usize, String, u64)> = Vec::new();
 
     // Pass 1: Collect params from Unknown expressions (unoptimized code)
@@ -5757,10 +5791,25 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
             // inputs have distinct VarIds but identical render.
             let first_leaf = phi_resolve_var_chain(inputs[0], &ssa.vars, 8);
             let first_vn = ssa.vars[first_leaf.0 as usize].varnode;
-            let all_same_render = inputs.iter().all(|&inp| {
-                let leaf = phi_resolve_var_chain(inp, &ssa.vars, 8);
-                leaf == first_leaf || ssa.vars[leaf.0 as usize].varnode == first_vn
-            });
+            // Constants render as their values: a join of different
+            // constants in one register (`mov eax, 2` / `mov eax, 0` on the
+            // paths to a shared `ret`) is a real join, not one value.
+            let constants: Vec<Option<u64>> = inputs
+                .iter()
+                .map(|&inp| {
+                    match ssa.vars[phi_resolve_var_chain(inp, &ssa.vars, 8).0 as usize].expr {
+                        Expr::Const(value, _) => Some(value),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let distinct_constants = constants.iter().all(Option::is_some)
+                && constants.iter().any(|c| *c != constants[0]);
+            let all_same_render = !distinct_constants
+                && inputs.iter().all(|&inp| {
+                    let leaf = phi_resolve_var_chain(inp, &ssa.vars, 8);
+                    leaf == first_leaf || ssa.vars[leaf.0 as usize].varnode == first_vn
+                });
             if all_same_render {
                 let rewritten = Expr::Var(inputs[0]);
                 crate::provenance::rewrite(&mut ssa.vars, phi_v.0 as usize, rewritten);
@@ -5814,6 +5863,12 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
                 _ => continue,
             };
 
+            if !entered_only_from(ssa, taken, common_dom)
+                || !entered_only_from(ssa, fallthrough, common_dom)
+            {
+                continue;
+            }
+
             // Classify each pred group by which CBranch arm dominates it.
             let group_under = |ps: &[BlockId], arm: BlockId| -> bool {
                 ps.iter().all(|p| phi_dom_dominates(&dom, arm.0, p.0))
@@ -5838,9 +5893,12 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
             let e_leaf = phi_resolve_var_chain(else_val, &ssa.vars, 8);
             let same_leaf = t_leaf == e_leaf;
             let same_location = {
-                let t_vn = ssa.vars[t_leaf.0 as usize].varnode;
-                let e_vn = ssa.vars[e_leaf.0 as usize].varnode;
-                t_vn == e_vn
+                let (t, e) = (&ssa.vars[t_leaf.0 as usize], &ssa.vars[e_leaf.0 as usize]);
+                let distinct_constants = matches!(
+                    (&t.expr, &e.expr),
+                    (Expr::Const(a, _), Expr::Const(b, _)) if a != b
+                );
+                t.varnode == e.varnode && !distinct_constants
             };
             if same_leaf || same_location {
                 let rewritten = Expr::Var(then_val);
@@ -5884,6 +5942,10 @@ fn build_nested_phi_ternary(
         _ => return None,
     };
 
+    if !entered_only_from(ssa, taken, common) || !entered_only_from(ssa, fallthrough, common) {
+        return None;
+    }
+
     let mut then_groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
     let mut else_groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
     for g in groups {
@@ -5916,6 +5978,24 @@ fn build_nested_phi_ternary(
         size,
     );
     Some(id)
+}
+
+/// True when `from` is the only block that transfers to `arm`. Dominance
+/// alone does not tie an arm to one side of a branch: an arm block that is
+/// also entered from the other side (a loop exit joining an early-out, a
+/// shared error path) carries its value for both outcomes.
+fn entered_only_from(ssa: &SsaCfg, arm: BlockId, from: BlockId) -> bool {
+    ssa.blocks.iter().filter(|b| b.id != from).all(|b| {
+        let enters = match &b.terminator {
+            SsaTerminator::Fallthrough(t) | SsaTerminator::Branch(t) => *t == arm,
+            SsaTerminator::CBranch {
+                taken, fallthrough, ..
+            } => *taken == arm || *fallthrough == arm,
+            SsaTerminator::Call { fallthrough, .. } => *fallthrough == arm,
+            SsaTerminator::Return(_) | SsaTerminator::Indirect(_) => false,
+        };
+        !enters
+    })
 }
 
 fn phi_resolve_var_chain(id: VarId, vars: &[VarDef], depth: u32) -> VarId {
