@@ -51,6 +51,16 @@ pub fn print_c_with_try(
         imports,
         try_regions,
         register_params: Vec::new(),
+        live: live_values(ssa),
+        zext_widened: ssa
+            .vars
+            .iter()
+            .filter(|v| is_zext_artifact(v, ssa))
+            .filter_map(|v| match v.expr {
+                Expr::UnaryOp(UnaryOpKind::Zext, inner) => Some(inner),
+                _ => None,
+            })
+            .collect(),
     };
     for v in &ssa.vars {
         let Some(name) = v.param_name.as_ref().filter(|n| n.starts_with("param_")) else {
@@ -310,6 +320,7 @@ fn print_stmts_with_tracker(
     tracker.stack_alias = _parent_tracker.stack_alias.clone();
     for (i, stmt) in stmts.iter().enumerate() {
         print_stmt_tracked(stmt, stmts, i, ssa, ctx, indent, out, &mut tracker);
+        forget_emitted_after(stmt, &mut tracker);
     }
 }
 
@@ -329,6 +340,31 @@ fn replace_register(line: &str, pattern: &str, replacement: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// True for a printed call `name(...)`. Casts and dereferences such as
+/// `(uint8_t)*(p)` are values: the same load text elsewhere (in a loop) is a
+/// different read, so it never makes an assignment redundant.
+fn is_call_expr(expr: &str) -> bool {
+    expr.ends_with(')')
+        && expr.find('(').is_some_and(|open| {
+            open > 0
+                && expr[..open]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// True when `line` contains `word` as a whole identifier.
+fn mentions_word(line: &str, word: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    line.match_indices(word).any(|(at, _)| {
+        line[..at].chars().next_back().is_none_or(|c| !is_ident(c))
+            && line[at + word.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_ident(c))
+    })
 }
 
 /// Text-level post-processing to clean up common patterns.
@@ -540,7 +576,7 @@ fn post_process(
                 let is_reg_lhs = lhs
                     .chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-                let is_call_rhs = rhs.contains('(') && rhs.contains(')');
+                let is_call_rhs = is_call_expr(rhs);
                 if is_reg_lhs && is_call_rhs {
                     // Check if this call result is already represented by another line
                     let mut is_redundant = false;
@@ -1664,7 +1700,7 @@ fn post_process(
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                 && lhs.len() >= 2
                 && lhs.len() <= 3;
-            let is_call = rhs.contains('(') && rhs.contains(')');
+            let is_call = is_call_expr(rhs);
             if is_reg && is_call {
                 let mut redundant = false;
                 for j in (0..i).chain(i + 1..lines.len()) {
@@ -2594,8 +2630,10 @@ fn post_process(
                 return false;
             }
         }
-        // Frame pointer adjustment: `iVarN = iVarN + N;` (sp cleanup mirror in epilogue).
-        {
+        // Frame pointer adjustment: `iVarN = iVarN + N;` (sp cleanup mirror in
+        // epilogue). AArch64 frames move in 16-byte steps; any other step is a
+        // counter or pointer increment (`p = p + 1;`) and must stay.
+        if matches!(ctx.arch, Architecture::AArch64) {
             let core = t.trim_end_matches(';');
             if let Some((lhs, rhs)) = core.split_once(" = ") {
                 let lhs = lhs.trim();
@@ -2605,10 +2643,11 @@ fn post_process(
                     && (rhs[lhs.len()..].starts_with(" + ") || rhs[lhs.len()..].starts_with(" - "))
                 {
                     let tail = rhs[lhs.len() + 3..].trim();
-                    if tail
-                        .chars()
-                        .all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X')
-                    {
+                    let step = match tail.strip_prefix("0x").or_else(|| tail.strip_prefix("0X")) {
+                        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                        None => tail.parse::<u64>().ok(),
+                    };
+                    if step.is_some_and(|n| n != 0 && n % 16 == 0) {
                         return false;
                     }
                 }
@@ -4750,8 +4789,19 @@ fn post_process(
                     && !lt.contains("if ")
                 {
                     let expr = lt[full_reg.len() + 3..lt.len() - 1].to_string();
-                    // Check if next line's condition uses a sub-register
-                    if next.starts_with("if (") {
+                    // Check if next line's condition uses a sub-register,
+                    // and nothing after it reads the register (a loop that
+                    // carries the value needs the assignment).
+                    let family = format!(
+                        "{} R{} E{}",
+                        sub_regs.join(" "),
+                        &full_reg[1..],
+                        &full_reg[1..]
+                    );
+                    let read_later = lines[i + 2..]
+                        .iter()
+                        .any(|l| family.split(' ').any(|reg| mentions_word(l, reg)));
+                    if next.starts_with("if (") && !read_later {
                         for sub in *sub_regs {
                             let check = format!("if ({} ", sub);
                             if next.starts_with(&check) {
@@ -14017,6 +14067,13 @@ struct PrintCtx<'a> {
     /// Register spellings whose entry value is a named parameter
     /// (`RSI`/`ESI` → `param_1`); text rules may rename only these.
     register_params: Vec<(String, String)>,
+    /// Values that reach an observable use (a branch, return, store, call,
+    /// or user op). Register assignments outside this set are dead.
+    live: std::collections::HashSet<VarId>,
+    /// Values widened by a skipped zero-extension artifact
+    /// (`RAX = zext(EAX)` after `EAX = expr`): the narrow value is the one
+    /// that prints, even with that single use.
+    zext_widened: std::collections::HashSet<VarId>,
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
@@ -14040,7 +14097,16 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     } else {
         for block in &ssa.blocks {
             if let SsaTerminator::Return(Some(v)) = &block.terminator {
-                let vdef = ssa.var(*v);
+                // x86-64 `ret` after a 32-bit write returns RAX = zext(EAX);
+                // the value the function computed is the 32-bit one.
+                let vdef = match ssa.var(*v).expr {
+                    Expr::UnaryOp(UnaryOpKind::Zext, inner)
+                        if is_zext_artifact(ssa.var(*v), ssa) =>
+                    {
+                        ssa.var(inner)
+                    }
+                    _ => ssa.var(*v),
+                };
                 _return_size = vdef.size;
                 // Prefer display_type from signature propagation
                 return_type = if let Some(d) = vdef.display_type {
@@ -14488,9 +14554,151 @@ fn print_stmts(
     indent: usize,
     out: &mut String,
 ) {
+    print_stmts_tracked(stmts, ssa, ctx, indent, out);
+}
+
+/// [`print_stmts`], returning the register state after the last statement.
+fn print_stmts_tracked(
+    stmts: &[StructuredStmt],
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    indent: usize,
+    out: &mut String,
+) -> RegTracker {
     let mut tracker = RegTracker::new();
     for (i, stmt) in stmts.iter().enumerate() {
         print_stmt_tracked(stmt, stmts, i, ssa, ctx, indent, out, &mut tracker);
+        forget_emitted_after(stmt, &mut tracker);
+    }
+    tracker
+}
+
+/// The printed name of a register value already emitted as `name = expr;`
+/// that is still that register's latest value, when re-expanding `expr` would
+/// be wrong: a register the expression reads has been assigned since (its own
+/// statement included: after `h = h + t;`, `h + c` must not print as
+/// `h + t + c`).
+fn emitted_name(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> Option<String> {
+    let vdef = ssa.var(id);
+    if vdef.varnode.space != AddressSpaceId::Register {
+        return None;
+    }
+    let (value, name, seq) = tracker.emitted.get(&vdef.varnode.offset)?;
+    if *value != id {
+        return None;
+    }
+    // A value read from memory is that read: printing `*p` again in a later
+    // condition reads memory a second time.
+    if reads_memory(id, ssa, ctx, 6) {
+        return Some(name.clone());
+    }
+    let mut read = Vec::new();
+    registers_read(id, ssa, &mut read, 6);
+    read.iter()
+        .any(|offset| {
+            tracker
+                .emitted
+                .get(offset)
+                .is_some_and(|(_, _, later)| later >= seq)
+        })
+        .then(|| name.clone())
+}
+
+/// True when `id`'s expanded expression loads from memory (looking through
+/// values that would be expanded, not through named ones). Stack slots print
+/// as their variables, so reading one is not a memory re-read.
+fn reads_memory(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, depth: u32) -> bool {
+    let operands: Vec<VarId> = match &ssa.var(id).expr {
+        Expr::Load(ptr) => return try_stack_var_name_ctx(*ptr, ssa, ctx.arch).is_none(),
+        Expr::FieldAccess(base, _) => {
+            return !(matches!(ctx.arch, Architecture::AArch64)
+                && get_aarch64_sp_local_offset(*base, ssa).is_some())
+        }
+        Expr::Var(a) | Expr::UnaryOp(_, a) => vec![*a],
+        Expr::BinOp(_, a, b) => vec![*a, *b],
+        _ => return false,
+    };
+    depth > 0
+        && operands.into_iter().any(|operand| {
+            let v = ssa.var(operand);
+            let named = v.param_name.is_some() || matches!(v.expr, Expr::Phi(_) | Expr::Unknown);
+            !named && reads_memory(operand, ssa, ctx, depth - 1)
+        })
+}
+
+/// Register offsets whose names `id`'s expanded expression would print:
+/// registers holding a Phi, an entry value, or a named value. Registers with
+/// a concrete expression are expanded in turn, so only their leaves count.
+fn registers_read(id: VarId, ssa: &SsaCfg, out: &mut Vec<u64>, depth: u32) {
+    let operands: Vec<VarId> = match &ssa.var(id).expr {
+        Expr::Var(a) | Expr::UnaryOp(_, a) | Expr::Load(a) | Expr::FieldAccess(a, _) => vec![*a],
+        Expr::BinOp(_, a, b) => vec![*a, *b],
+        Expr::Ternary(c, a, b) => vec![*c, *a, *b],
+        Expr::UserOp { inputs, .. } => inputs.clone(),
+        Expr::Phi(_) | Expr::Const(..) | Expr::Unknown => vec![],
+    };
+    for operand in operands {
+        let v = ssa.var(operand);
+        let printed_by_name =
+            v.param_name.is_some() || matches!(v.expr, Expr::Phi(_) | Expr::Unknown) || depth == 0;
+        if v.varnode.space == AddressSpaceId::Register && printed_by_name {
+            out.push(v.varnode.offset);
+        } else if depth > 0 {
+            registers_read(operand, ssa, out, depth - 1);
+        }
+    }
+}
+
+/// Values reachable from observable uses: branch conditions, returns,
+/// indirect targets, call arguments, stores, user ops, and named variables.
+fn live_values(ssa: &SsaCfg) -> std::collections::HashSet<VarId> {
+    let mut stack: Vec<VarId> = Vec::new();
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Store { addr, val } => stack.extend([*addr, *val]),
+                Stmt::Call { args, .. } => stack.extend(args.iter().copied()),
+                Stmt::Assign(v) => {
+                    let def = ssa.var(*v);
+                    if def.param_name.is_some() || matches!(def.expr, Expr::UserOp { .. }) {
+                        stack.push(*v);
+                    }
+                }
+            }
+        }
+        match &block.terminator {
+            SsaTerminator::CBranch { cond, .. } => stack.push(*cond),
+            SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => stack.push(*v),
+            SsaTerminator::Call { args, .. } => stack.extend(args.iter().copied()),
+            _ => {}
+        }
+    }
+    let mut live = std::collections::HashSet::new();
+    while let Some(v) = stack.pop() {
+        if (v.0 as usize) >= ssa.vars.len() || !live.insert(v) {
+            continue;
+        }
+        match &ssa.var(v).expr {
+            Expr::Var(a) | Expr::UnaryOp(_, a) | Expr::Load(a) | Expr::FieldAccess(a, _) => {
+                stack.push(*a)
+            }
+            Expr::BinOp(_, a, b) => stack.extend([*a, *b]),
+            Expr::Ternary(c, a, b) => stack.extend([*c, *a, *b]),
+            Expr::Phi(inputs) | Expr::UserOp { inputs, .. } => stack.extend(inputs.iter().copied()),
+            Expr::Const(..) | Expr::Unknown => {}
+        }
+    }
+    live
+}
+
+/// Nested bodies and calls may assign any register name, so printed names
+/// stop identifying earlier values after them.
+fn forget_emitted_after(stmt: &StructuredStmt, tracker: &mut RegTracker) {
+    if !matches!(
+        stmt,
+        StructuredStmt::Assign { .. } | StructuredStmt::Store { .. }
+    ) {
+        tracker.emitted.clear();
     }
 }
 
@@ -14502,6 +14710,10 @@ struct RegTracker {
     reg_expr_str: std::collections::HashMap<(u64, u32), String>,
     /// Map: stack variable name → formatted value string (for Store alias tracking)
     stack_alias: std::collections::HashMap<String, String>,
+    /// Register offset → (value, printed name, sequence) of the last
+    /// `name = expr;` printed in this list for that register.
+    emitted: std::collections::HashMap<u64, (VarId, String, usize)>,
+    emit_seq: usize,
 }
 
 impl RegTracker {
@@ -14509,6 +14721,8 @@ impl RegTracker {
         Self {
             reg_source: std::collections::HashMap::new(),
             reg_expr_str: std::collections::HashMap::new(),
+            emitted: std::collections::HashMap::new(),
+            emit_seq: 0,
             stack_alias: std::collections::HashMap::new(),
         }
     }
@@ -14569,11 +14783,17 @@ impl RegTracker {
 fn next_returns(stmts: &[StructuredStmt], idx: usize, var: VarId, ssa: &SsaCfg) -> bool {
     for stmt in &stmts[idx + 1..] {
         match stmt {
-            StructuredStmt::Return(Some(v)) => return *v == var,
+            StructuredStmt::Return(Some(v)) => {
+                // `RAX = zext(EAX)` before `ret` returns the same value.
+                let widened = matches!(ssa.var(*v).expr, Expr::UnaryOp(UnaryOpKind::Zext, inner) if inner == var)
+                    && is_zext_artifact(ssa.var(*v), ssa);
+                return *v == var || widened;
+            }
             StructuredStmt::Assign { lhs, .. } => {
                 let v = ssa.var(*lhs);
                 let hidden = v.varnode.space == AddressSpaceId::Unique
-                    || (v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset));
+                    || (v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset))
+                    || is_zext_artifact(v, ssa);
                 if !hidden {
                     return false;
                 }
@@ -14654,10 +14874,20 @@ fn print_stmt_tracked(
                 && vdef.param_name.is_none()
                 && !vdef.call_return
                 && matches!(&vdef.expr, Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _))
+                && !ctx.zext_widened.contains(lhs)
             {
                 return;
             }
             if vdef.varnode.space == AddressSpaceId::Unique {
+                return;
+            }
+            // Dead register value: nothing observable reads it (late passes
+            // such as division and Phi rewrites leave such chains behind).
+            if vdef.varnode.space == AddressSpaceId::Register
+                && vdef.param_name.is_none()
+                && !ctx.live.is_empty()
+                && !ctx.live.contains(lhs)
+            {
                 return;
             }
             if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) {
@@ -14852,6 +15082,7 @@ fn print_stmt_tracked(
                             v.varnode.space == AddressSpaceId::Unique
                                 || (v.varnode.space == AddressSpaceId::Register
                                     && is_flag(v.varnode.offset))
+                                || is_zext_artifact(v, ssa)
                         }
                         _ => false,
                     });
@@ -14893,6 +15124,13 @@ fn print_stmt_tracked(
                 }
             }
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
+            if vdef.varnode.space == AddressSpaceId::Register {
+                tracker.emit_seq += 1;
+                let seq = tracker.emit_seq;
+                tracker
+                    .emitted
+                    .insert(vdef.varnode.offset, (*lhs, name, seq));
+            }
         }
         StructuredStmt::Store { addr, val } => {
             let addr_str = format_addr(*addr, ssa, ctx);
@@ -15308,7 +15546,12 @@ fn print_stmt_tracked(
         }
         StructuredStmt::DoWhile { cond, negate, body } => {
             let body_filtered = filter_boilerplate(body, ssa);
-            let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
+            // The condition runs after the body, so it reads the names the
+            // body assigned: format it with the body's final tracker.
+            let mut body_text = String::new();
+            let after_body =
+                print_stmts_tracked(&body_filtered, ssa, ctx, indent + 1, &mut body_text);
+            let cond_expr = format_condition_tracked(*cond, ssa, ctx, &after_body);
             let display_cond = if *negate {
                 negate_condition(&cond_expr)
             } else {
@@ -15325,7 +15568,7 @@ fn print_stmt_tracked(
                 print_stmts(&body_filtered, ssa, ctx, indent, out);
             } else {
                 out.push_str(&format!("{}do {{\n", pad));
-                print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
+                out.push_str(&body_text);
                 out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
             }
         }
@@ -15546,6 +15789,10 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
             if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, sz) {
                 return expr_str.to_string();
             }
+        }
+
+        if let Some(name) = emitted_name(id, ssa, ctx, tracker) {
+            return name;
         }
 
         // SSA-direct rendering: if this register var has a concrete SSA expression
@@ -16023,6 +16270,7 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             let mut l = format_var_tracked(*left, ssa, ctx, tracker);
             let mut r = format_var_tracked(*right, ssa, ctx, tracker);
             let op = binop_str(*kind);
+            parenthesize_operands(op, &mut l, &mut r);
             if matches!(kind, BinOpKind::Add) {
                 let rv = ssa.var(*right);
                 if let Expr::Const(val, sz) = &rv.expr {
@@ -16612,6 +16860,9 @@ fn is_comparison(kind: BinOpKind) -> bool {
 /// Format a condition operand, preferring the SSA expression over the tracker.
 /// This avoids cases where both operands alias to the same register name.
 fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    if let Some(name) = emitted_name(id, ssa, ctx, tracker) {
+        return name;
+    }
     let vdef = ssa.var(id);
     // If the var has a param name, use it
     if let Some(ref name) = vdef.param_name {
@@ -18039,9 +18290,10 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                     }
                 }
             }
-            let l = format_var(*left, ssa, ctx);
-            let r = format_var(*right, ssa, ctx);
+            let mut l = format_var(*left, ssa, ctx);
+            let mut r = format_var(*right, ssa, ctx);
             let op = binop_str(*kind);
+            parenthesize_operands(op, &mut l, &mut r);
             // Detect negative constant on right side of add
             if matches!(kind, BinOpKind::Add) {
                 let rv = ssa.var(*right);
@@ -19333,6 +19585,77 @@ fn typed_name(size: u32, ty: InferredType) -> &'static str {
     }
 }
 
+/// C precedence of a printed binary operator; higher binds tighter.
+fn c_precedence(op: &str) -> Option<u8> {
+    Some(match op {
+        "*" | "/" | "%" => 10,
+        "+" | "-" => 9,
+        "<<" | ">>" => 8,
+        "<" | "<=" | ">" | ">=" => 7,
+        "==" | "!=" => 6,
+        "&" => 5,
+        "^" => 4,
+        "|" => 3,
+        "&&" => 2,
+        "||" => 1,
+        "?" | ":" => 0,
+        _ => return None,
+    })
+}
+
+/// Precedence of the loosest binary operator outside parentheses in a
+/// printed expression. Binary operators are always printed with spaces on
+/// both sides (`a + b`), while casts, dereferences, and unary minus are not,
+/// so a spaced operator token at depth 0 is a binary operator. String and
+/// character literals and `/* */` comments are skipped.
+fn loosest_top_level_op(expr: &str) -> Option<u8> {
+    let bytes = expr.as_bytes();
+    let (mut depth, mut i, mut lowest) = (0i32, 0usize, None::<u8>);
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = expr[i..].find("*/").map_or(bytes.len(), |end| i + end + 1);
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b' ' if depth == 0 => {
+                if let Some(len) = expr[i + 1..].find(' ') {
+                    if let Some(p) = c_precedence(&expr[i + 1..i + 1 + len]) {
+                        lowest = Some(lowest.map_or(p, |l| l.min(p)));
+                        i += len;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    lowest
+}
+
+/// Parenthesize operands that would otherwise regroup under `op`:
+/// `h + (h << 5)` must not print as `h + h << 5`.
+fn parenthesize_operands(op: &str, l: &mut String, r: &mut String) {
+    let Some(parent) = c_precedence(op) else {
+        return;
+    };
+    if loosest_top_level_op(l).is_some_and(|child| child < parent) {
+        *l = format!("({l})");
+    }
+    // Equal precedence on the right regroups too (`a - (b - c)`), except
+    // under `+`, where wrapping integer addition and subtraction associate.
+    if loosest_top_level_op(r).is_some_and(|child| child < parent || (child == parent && op != "+"))
+    {
+        *r = format!("({r})");
+    }
+}
+
 fn binop_str(kind: BinOpKind) -> &'static str {
     match kind {
         BinOpKind::Add | BinOpKind::FloatAdd => "+",
@@ -19469,6 +19792,8 @@ mod dependency_render_tests {
             imports: &imports,
             try_regions: &[],
             register_params: Vec::new(),
+            live: std::collections::HashSet::new(),
+            zext_widened: std::collections::HashSet::new(),
         };
         post_process(
             &mut output,

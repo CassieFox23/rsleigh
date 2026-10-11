@@ -4,6 +4,15 @@ use std::collections::HashMap;
 
 /// Build a control flow graph from decoded instructions.
 pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
+    build_cfg_with_memory(instructions, &|_, _| None)
+}
+
+/// [`build_cfg`], reading jump tables from the loaded image so computed
+/// `switch` dispatch gets its case edges.
+pub fn build_cfg_with_memory(
+    instructions: &[(u64, Instruction)],
+    memory: crate::jump_table::Memory,
+) -> Cfg {
     if instructions.is_empty() {
         return Cfg {
             blocks: vec![],
@@ -59,6 +68,15 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         }
     }
 
+    let tables: HashMap<u64, crate::jump_table::JumpTable> =
+        crate::jump_table::find(instructions, memory)
+            .into_iter()
+            .map(|table| (table.jump, table))
+            .collect();
+    for table in tables.values() {
+        leaders.extend(table.targets.iter().copied());
+    }
+
     leaders.sort_unstable();
     leaders.dedup();
 
@@ -92,11 +110,13 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
     };
     // Tail calls continue into synthetic blocks appended after the real ones:
     // (address of the jump, terminator).
-    let mut synthetic: Vec<(u64, Terminator)> = Vec::new();
+    let mut synthetic: Vec<(u64, Vec<(u64, PcodeOp)>, Terminator)> = Vec::new();
     let first_synthetic = order.len();
-    let tail_call = |synthetic: &mut Vec<(u64, Terminator)>, at: u64, target: CallTarget| {
+    let tail_call = |synthetic: &mut Vec<(u64, Vec<(u64, PcodeOp)>, Terminator)>,
+                     at: u64,
+                     target: CallTarget| {
         let ret = BlockId(first_synthetic + synthetic.len());
-        synthetic.push((at, Terminator::Return));
+        synthetic.push((at, Vec::new(), Terminator::Return));
         Terminator::Call {
             target,
             fallthrough: ret,
@@ -215,13 +235,13 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                                 ),
                             });
                             let taken = BlockId(first_synthetic + synthetic.len());
-                            synthetic.push((last_inst_addr, Terminator::Return));
+                            synthetic.push((last_inst_addr, Vec::new(), Terminator::Return));
                             let call = tail_call(
                                 &mut synthetic,
                                 last_inst_addr,
                                 CallTarget::Direct(target),
                             );
-                            synthetic[taken.0 - first_synthetic].1 = call;
+                            synthetic[taken.0 - first_synthetic].2 = call;
                             Terminator::CBranch {
                                 cond,
                                 taken,
@@ -273,7 +293,21 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     // ARM32 LR = register offset 0x58=88 (r14), AArch64 x30 = 0xF0=240
                     let is_bx_lr = dest_vn.space == AddressSpaceId::Register
                         && matches!(dest_vn.offset, 88 | 240);
-                    if is_stack_return || is_bx_lr {
+                    let table = tables
+                        .get(&last_inst_addr)
+                        .filter(|t| t.targets.iter().all(|a| leader_to_block.contains_key(a)));
+                    if let Some(table) = table {
+                        let cases: Vec<BlockId> =
+                            table.targets.iter().map(|a| leader_to_block[a]).collect();
+                        switch_chain(
+                            &mut ops,
+                            &mut synthetic,
+                            first_synthetic,
+                            last_inst_addr,
+                            table.index,
+                            &cases,
+                        )
+                    } else if is_stack_return || is_bx_lr {
                         Terminator::Return
                     } else if let Some(target) =
                         indirect_jump_tail_target(&mut ops, dest_vn, last_inst_addr)
@@ -318,6 +352,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                         .unwrap_or_else(|| {
                             synthetic.push((
                                 last_inst_addr,
+                                Vec::new(),
                                 Terminator::Indirect(Varnode::constant(0, 8)),
                             ));
                             BlockId(first_synthetic + synthetic.len() - 1)
@@ -359,6 +394,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                         .unwrap_or_else(|| {
                             synthetic.push((
                                 last_inst_addr,
+                                Vec::new(),
                                 Terminator::Indirect(Varnode::constant(0, 8)),
                             ));
                             BlockId(first_synthetic + synthetic.len() - 1)
@@ -389,12 +425,12 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
             terminator,
         });
     }
-    for (offset, (addr, terminator)) in synthetic.into_iter().enumerate() {
+    for (offset, (addr, ops, terminator)) in synthetic.into_iter().enumerate() {
         blocks.push(BasicBlock {
             terminator_origin: None,
             id: BlockId(first_synthetic + offset),
             addr,
-            ops: Vec::new(),
+            ops,
             terminator,
         });
     }
@@ -404,6 +440,72 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         blocks,
         diagnostics,
     }
+}
+
+/// Dispatch on a recovered jump table as a chain of `index == k` tests:
+/// the jump's block tests case 0, synthetic blocks test the rest, and the
+/// last case is the remaining edge (the bounds check already ran). The
+/// structurer folds such chains into `switch`.
+fn switch_chain(
+    ops: &mut Vec<(u64, PcodeOp)>,
+    synthetic: &mut Vec<(u64, Vec<(u64, PcodeOp)>, Terminator)>,
+    first_synthetic: usize,
+    at: u64,
+    index: Varnode,
+    cases: &[BlockId],
+) -> Terminator {
+    let Some((&last, tested)) = cases.split_last() else {
+        return Terminator::Indirect(index);
+    };
+    if tested.is_empty() {
+        return Terminator::Branch(last);
+    }
+    let test = |k: usize| {
+        let cond = Varnode {
+            space: AddressSpaceId::Unique,
+            offset: (3 << 61) | (at << 10) | k as u64,
+            size: 1,
+        };
+        let op = PcodeOp::IntEq {
+            out: cond,
+            left: index,
+            right: Varnode::constant(k as u64, index.size),
+        };
+        (cond, (at, op))
+    };
+    let next_block = |synthetic: &Vec<_>, k: usize| {
+        if k + 1 == tested.len() {
+            last
+        } else {
+            BlockId(first_synthetic + synthetic.len() + 1)
+        }
+    };
+    let (cond, op) = test(0);
+    ops.push(op);
+    let fallthrough = if tested.len() == 1 {
+        last
+    } else {
+        BlockId(first_synthetic + synthetic.len())
+    };
+    let head = Terminator::CBranch {
+        cond,
+        taken: tested[0],
+        fallthrough,
+    };
+    for (k, &case) in tested.iter().enumerate().skip(1) {
+        let (cond, op) = test(k);
+        let fallthrough = next_block(synthetic, k);
+        synthetic.push((
+            at,
+            vec![op],
+            Terminator::CBranch {
+                cond,
+                taken: case,
+                fallthrough,
+            },
+        ));
+    }
+    head
 }
 
 /// Index of the last op in `ops[..end]` that writes `vn`.

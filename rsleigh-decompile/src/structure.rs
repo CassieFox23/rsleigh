@@ -560,11 +560,21 @@ fn emit_region(
                     );
                     emitted[exit.0] = exit_was_emitted;
 
-                    out.push(StructuredStmt::While {
-                        cond: *cond,
-                        negate,
-                        body,
-                    });
+                    // A self-loop tests its condition after its statements:
+                    // `do { body } while (cond)`, not a pre-tested `while`.
+                    if is_self_loop {
+                        out.push(StructuredStmt::DoWhile {
+                            cond: *cond,
+                            negate,
+                            body,
+                        });
+                    } else {
+                        out.push(StructuredStmt::While {
+                            cond: *cond,
+                            negate,
+                            body,
+                        });
+                    }
                     current = exit;
                     continue;
                 }
@@ -586,6 +596,10 @@ fn emit_region(
                 }
 
                 if *taken != merge {
+                    let tail = shared_tail(ssa, back_edges, *taken, merge, emitted);
+                    for b in tail.iter().flatten() {
+                        emitted[b.0] = false;
+                    }
                     emit_region(
                         ssa,
                         cfg,
@@ -599,8 +613,15 @@ fn emit_region(
                         None,
                         consumed,
                     );
+                    for b in tail.iter().flatten() {
+                        emitted[b.0] = true;
+                    }
                 }
                 if *fallthrough != merge {
+                    let tail = shared_tail(ssa, back_edges, *fallthrough, merge, emitted);
+                    for b in tail.iter().flatten() {
+                        emitted[b.0] = false;
+                    }
                     emit_region(
                         ssa,
                         cfg,
@@ -614,6 +635,9 @@ fn emit_region(
                         None,
                         consumed,
                     );
+                    for b in tail.iter().flatten() {
+                        emitted[b.0] = true;
+                    }
                 }
 
                 if merge_valid {
@@ -803,6 +827,44 @@ fn emit_region(
                 break;
             }
         }
+    }
+}
+
+/// The blocks of a short straight-line path from an already-emitted `start`
+/// to `merge` or a return. When two branches share such a path (an error
+/// exit reached from either side), the second arm would print as empty;
+/// repeating the short path keeps that arm's behavior visible without gotos.
+fn shared_tail(
+    ssa: &SsaCfg,
+    back_edges: &[(BlockId, BlockId)],
+    start: BlockId,
+    merge: BlockId,
+    emitted: &[bool],
+) -> Option<Vec<BlockId>> {
+    if start.0 >= emitted.len() || !emitted[start.0] {
+        return None;
+    }
+    let (mut path, mut stmts, mut block) = (Vec::new(), 0usize, start);
+    loop {
+        if path.len() >= 4 || path.contains(&block) || back_edges.iter().any(|(_, h)| *h == block) {
+            return None;
+        }
+        let b = ssa.blocks.get(block.0)?;
+        stmts += b.stmts.len();
+        if stmts > 48 {
+            return None;
+        }
+        path.push(block);
+        let next = match &b.terminator {
+            SsaTerminator::Return(_) => return Some(path),
+            SsaTerminator::Fallthrough(n) | SsaTerminator::Branch(n) => *n,
+            SsaTerminator::Call { fallthrough, .. } => *fallthrough,
+            _ => return None,
+        };
+        if next == merge || next.0 >= emitted.len() {
+            return Some(path);
+        }
+        block = next;
     }
 }
 

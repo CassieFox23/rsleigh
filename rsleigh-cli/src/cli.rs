@@ -10621,6 +10621,24 @@ fn discover_elf_functions(
         // No separate pass needed.
     }
 
+    // `.eh_frame` records where functions start and end. Scans above also
+    // pick up `.cold` parts (their FDEs start mid-frame) and addresses inside
+    // functions (jump-table targets, branch targets after padding); those are
+    // pieces of the enclosing function, decoded with it, not functions.
+    let layout = fde_layout(data);
+    let mut entries: Vec<(u64, u64)> = layout
+        .extents
+        .iter()
+        .filter(|(start, _)| !layout.mid_frame.contains(start))
+        .map(|(start, end)| (*start, *end))
+        .collect();
+    entries.sort_unstable();
+    let inside_function = |addr: u64| {
+        let i = entries.partition_point(|&(start, _)| start < addr);
+        i > 0 && addr < entries[i - 1].1
+    };
+    found.retain(|&addr| !layout.mid_frame.contains(&addr) && !inside_function(addr));
+
     // Filter: remove addresses in PLT range that aren't PLT entries
     // and sort results
     let mut result: Vec<(u64, String)> = found

@@ -42,6 +42,9 @@ See [workflow and limits](agent-workflow.md#bounded-backward-ssa-query),
 
 - CallInd resolution: `CALL [IAT_addr]` trace Load source → Direct
 - x86-32 CALL/RET boilerplate stripping (ret addr push, stack pop)
+- `BranchInd` ends a block. Jumps that leave the body are tail calls (call + synthetic return block): direct targets outside every decoded instruction, `JMP [slot]`, `JMP [reg+disp]`, register-held pointers
+- Jump tables (`jump_table.rs`, `build_cfg_with_memory`): x86-64 PIC `table + sext(table[idx*4])` and absolute `[table + idx*4|8]`. Entry count from the `CMP idx, N` + `JA`/`JAE` guard, else entries are read while they name decoded instructions. Dispatch becomes an `idx == k` chain on a register (or load temporary) that still holds the index; the structurer folds it into `switch`. Other computed jumps stay `Indirect` with `UnrecoveredIndirectJump`
+- The first instruction is block 0 even when detached fragments (GCC `.cold`) sit below it; a call with no decoded successor ends in a synthetic no-successor block instead of looping
 
 ## Fold passes (fold.rs)
 
@@ -53,7 +56,7 @@ Algebraic simplification, single-use temp inlining, copy prop, dead flag elim (x
 - Collapses `Phi(x,x)` / `Ternary(c,x,x)` via VarId/varnode equivalence
 - x86 DF ABI-default seed: DF=0 on entry (SysV/Win64/Cdecl32/GoAmd64). REP STOSB/MOVSB expansion reads DF — without seed, `(uint8_t)DF` leaks
 - Call arg collection runs BEFORE fold (prevents DCE of arg regs). x86-64 SysV, Win64 (auto-detect from PE), x86-32 cdecl/thiscall
-- Division-by-const → `x / 7`, modulo via `x - (x/D)*D` → `x % D`
+- Division by a constant (`recognize_magic_division`): unsigned 32-bit multiply-high forms `(zext(x)*M) >> k` and `t = mulhi(x, M); (((x - t) >> 1) + t) >> s` become `x / d` only after the arithmetic matches `x / d` on ~6000 sampled inputs; `x - q*d` (including `q*8 - q`) → `x % d`, `x == q*d` → `x % d == 0`
 - CDQ+IDIV: `Or(Lsl(Zext(sign),32),Zext(val))/Sext(div)` → `val / div`
 - Unnecessary cast removal when both operands share type
 - Redundant assignment folding: `x0=X; x0=Y+x0` → `x0=Y+X`
@@ -71,7 +74,18 @@ Algebraic simplification, single-use temp inlining, copy prop, dead flag elim (x
 - x86-32 stack param: `Load(EBP+8)` = param value (not deref)
 - Taint analysis, string decryption, crypto detection (20+ patterns)
 
+## Structure (structure.rs)
+
+- Post-dominators use a virtual exit joining every block without successors; a single real return used as the exit made unrelated (even unreachable) returns look like merge points
+- A self-loop (the block branches back to itself after its statements) is `do { } while`
+- An if/else arm that leads into a short straight-line path already printed elsewhere (≤4 blocks, ≤48 statements, to the merge or a return) repeats that path instead of printing an empty arm
+
 ## Printer (printer.rs)
+
+- Operands are parenthesized by C precedence (`h + (h << 5)`)
+- A register value already printed as `name = expr;` prints by name once a register its expression reads by name has been reassigned (otherwise re-expanding reads the newer value)
+- Print-time liveness: register assignments that reach no branch, return, store, call, or user op are not printed
+- Text rules that drop "redundant" assignments match only real calls `name(...)`, not casts or loads
 
 - Ghidra-style: typed signatures, local var decls, auto-named registers
 - RegTracker for per-block copy elision

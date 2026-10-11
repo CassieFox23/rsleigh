@@ -105,7 +105,7 @@ bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
 
 ### Codegen (`src/codegen/builder/disassembler/constructor/execution.rs`)
 
-- Subtable cache: `lift()` once per subtable, results cached
+- Subtable cache: `lift()` once per subtable, results cached. Implicitly built operands emit their ops up front; a subtable with an explicit `build` statement emits at that statement (`gen_build`). x86-64 `MOV r32` zero extension and ARM LDM/STM address updates depend on it; regenerate (`cargo run -p rsleigh-generate`) after codegen changes
 - Unique offset scheme: parent uses `(num_fields*2+2)*0x10000` to avoid subtable-export collision
 - `dynamic_value_expr()` resolves aliased token fields by bit position (r32/r64 share bits 0-2)
 - Signed displacements: cast signed token fields (simm8, simm16) to signed type before i128 widen
@@ -120,7 +120,8 @@ See `docs/decompiler-passes.md` for full pass list. Hotspots:
 - **printer.rs post_process is multi-pass.** Lines not present at entry can be synthesized mid-pipeline (e.g. `sp = (((sp - 8) - 12) - 0x10);` appears AFTER `mult_addr → sp` rename ~line 2243). Strips needing final form must run inside ARM32 retain block (before rename, match `mult_addr = (`) OR at very end before `*out = result`.
 - **STACKSTR pointer-write guard:** stack-string merge skips lines starting `*(` — those are global pointer-table writes like `*(uint64_t*)(DAT_00602948) = "gone";`.
 - **Thunk misdetection guard:** "empty body → `return target(); // thunk`" requires (a) zero body lines AND (b) no Call stmt/terminator anywhere AND (c) branch target address NOT in `ssa.blocks`. `Branch(BlockId)` always in-graph — self-loops previously emitted `return func_<self_addr>(); // thunk`.
-- **Deterministic Phi creation:** varnodes sorted `(space, offset, size)` before iteration. HashMap order previously made repeated runs non-deterministic, surfaced as differing ternary arms.
+- **Deterministic Phi creation:** varnodes sorted `(space, offset, size)` before iteration. HashMap order previously made repeated runs non-deterministic, surfaced as differing ternary arms. Any new loop over a `HashMap` whose order reaches output needs the same treatment; `tests/control_flow_exits.rs::repeated_decompiles_print_identical_text` repeats a decompile in-process to catch it.
+- **Post-process deletes lines by text shape.** Before adding a rule, check it cannot match loop-carried values: `iVarN = iVarN + 1` (now AArch64 16-byte steps only) and `REG = <expr with parens>` (now real calls only) used to erase `p++` and `c = *p`.
 
 ### Agent contracts (`rsleigh-cli/src/cli/agent/`)
 
@@ -194,6 +195,7 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Type inference: basic + Win32 typedef + interprocedural two-pass + heuristic field names; no constraint-based
 - MBA: SiMBA handles 1-4 var linear; non-linear + 5+ var need synthesis (egg catches some)
 - Some loop conditions not recovered (`while (OF == SF)`)
+- Jump tables: x86-64 PIC and absolute 4/8-byte tables only; ARM/AArch64 tables and signed (non-guarded) indexes stay `unresolved_control_flow`
 - x86-32 sequential TEST/JNZ sometimes nests wrong
 - Register-indirect calls across non-trivial CFG (e.g. multi-path conv. through a phi merge) still not resolved; same-function linear cases including cross-block IAT-into-reg now handled (resolve_callind_via_all_ops)
 - ARM32 VFP/NEON: decode OK, FP reg values not fully traced through folding
