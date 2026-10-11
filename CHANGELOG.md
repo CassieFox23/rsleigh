@@ -47,6 +47,10 @@ All notable user-facing changes to rsleigh are documented here.
   reported as ambiguous instead of overwriting each other, unreadable inputs
   fail instead of comparing against an empty set, and functions missing from a
   partial inventory are no longer reported as removed.
+- `imagebase` for ELF and Mach-O is the load base (lowest `PT_LOAD` page,
+  `__TEXT` vmaddr), as Ghidra reports it, not the first executable section.
+  It is part of evidence subject identity, so content IDs for ELF and Mach-O
+  records differ from earlier builds; existing records still verify.
 
 ## [0.5.0] - 2026-09-07
 
