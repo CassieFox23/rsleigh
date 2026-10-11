@@ -1518,10 +1518,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         .next()
                         .map(|l| l.matches("param_").count())
                         .unwrap_or(0);
-                    let size = insts
-                        .last()
-                        .map(|(a, i)| (*a + i.len - addr) as u64)
-                        .unwrap_or(0);
+                    let size: u64 = insts.iter().map(|(_, i)| i.len).sum();
 
                     serde_json::json!({
                         "name": name,
@@ -3489,7 +3486,16 @@ fn decode_func_with_operation_stage(
     let Some((off, available)) = off else {
         return vec![];
     };
-    let max = 4096
+    // An entry FDE records the function's extent; discovered symbols inside
+    // it (jump-table targets, `.cold` siblings) do not end the body.
+    let layout = fde_layout(data);
+    let fde_end = layout
+        .extents
+        .get(&fa)
+        .filter(|_| !layout.mid_frame.contains(&fa))
+        .copied();
+    let window = fde_end.map_or(4096, |end| ((end - fa) as usize).min(MAX_FDE_BODY));
+    let max = window
         .min(data.len().saturating_sub(off as usize))
         .min(available as usize);
     if max == 0 {
@@ -3514,12 +3520,16 @@ fn decode_func_with_operation_stage(
     let fa = fa + pad_skip as u64;
     let bytes = &raw_bytes[pad_skip..];
     let max = bytes.len();
-    let next_func = symbols
-        .iter()
-        .filter(|(a, name)| *a > fa && !name.starts_with("seh_scope_"))
-        .map(|(a, _)| *a)
-        .min()
-        .unwrap_or(fa + max as u64);
+    let next_func = if fde_end.is_some() {
+        fa + max as u64
+    } else {
+        symbols
+            .iter()
+            .filter(|(a, name)| *a > fa && !name.starts_with("seh_scope_"))
+            .map(|(a, _)| *a)
+            .min()
+            .unwrap_or(fa + max as u64)
+    };
     let decode_max = ((next_func - fa) as usize).min(max);
 
     // Go stack-check preamble extension. Three known shapes on amd64:
@@ -3677,7 +3687,229 @@ fn decode_func_with_operation_stage(
             }
         }
     }
+    if !insts.is_empty() && rsleigh_decompile::budget::stopped().is_none() {
+        follow_detached_fragments(
+            &mut insts,
+            symbols,
+            segs,
+            data,
+            dec,
+            diagnostics,
+            raw_operations,
+        );
+    }
     insts
+}
+
+/// Bounds on the detached code followed for one function.
+const MAX_FRAGMENTS: usize = 32;
+const MAX_FDE_BODY: usize = 0x10000;
+const MAX_FRAGMENT_BYTES: u64 = 4096;
+
+/// Calls that do not return; a detached fragment ends at one of them instead
+/// of running into whatever code the linker placed next.
+const NORETURN_CALLS: &[&str] = &[
+    "abort",
+    "exit",
+    "_exit",
+    "_Exit",
+    "quick_exit",
+    "__stack_chk_fail",
+    "__assert_fail",
+    "__assert_rtn",
+    "__cxa_throw",
+    "__cxa_rethrow",
+    "__cxa_throw_bad_array_new_length",
+    "_Unwind_Resume",
+    "longjmp",
+    "siglongjmp",
+    "__longjmp_chk",
+    "err",
+    "errx",
+    "verr",
+    "verrx",
+    "__fortify_fail",
+    "__chk_fail",
+    "pthread_exit",
+];
+
+/// `.eh_frame` extents for `data`, computed once per binary: decoding
+/// visits every function of one image in turn.
+fn fde_layout(data: &[u8]) -> std::rc::Rc<rsleigh_decompile::eh_frame::FdeLayout> {
+    type Cached = (
+        (usize, usize),
+        std::rc::Rc<rsleigh_decompile::eh_frame::FdeLayout>,
+    );
+    thread_local! {
+        static CACHE: std::cell::RefCell<Option<Cached>> = const { std::cell::RefCell::new(None) };
+    }
+    let key = (data.as_ptr() as usize, data.len());
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((k, layout)) if *k == key => layout.clone(),
+            _ => {
+                let layout = std::rc::Rc::new(rsleigh_decompile::eh_frame::fde_layout(data));
+                *cache = Some((key, layout.clone()));
+                layout
+            }
+        }
+    })
+}
+
+/// Direct jump and conditional-jump targets in `insts`.
+fn direct_jump_targets<'a>(
+    insts: impl Iterator<Item = &'a (u64, pcode_ir::Instruction)>,
+) -> Vec<u64> {
+    insts
+        .flat_map(|(_, inst)| &inst.ops)
+        .filter_map(|op| match op {
+            pcode_ir::PcodeOp::Branch { dest } | pcode_ir::PcodeOp::CBranch { dest, .. }
+                if dest.space == pcode_ir::AddressSpaceId::Ram =>
+            {
+                Some(dest.offset)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Decode code the function reaches by direct jumps to addresses outside
+/// its linear window that no symbol claims. GCC hot/cold splitting moves
+/// unlikely paths into `foo.cold` parts, usually placed below `foo`; without
+/// them those paths vanish from the body. Each fragment is decoded linearly
+/// up to an unconditional transfer, a noreturn call, already decoded code, or
+/// another function's start. Fragments are appended after the window, so
+/// `insts[0]` stays the entry; jumps to symbols remain tail calls.
+fn follow_detached_fragments(
+    insts: &mut Vec<(u64, pcode_ir::Instruction)>,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    data: &[u8],
+    dec: &mut rsleigh_api::Decoder,
+    diagnostics: &mut Vec<serde_json::Value>,
+    raw_operations: bool,
+) {
+    use pcode_ir::{AddressSpaceId, PcodeOp};
+    let layout = fde_layout(data);
+    let starts: std::collections::HashSet<u64> = symbols
+        .iter()
+        .map(|(a, _)| *a)
+        .filter(|a| !layout.mid_frame.contains(a))
+        .collect();
+    let noreturn: std::collections::HashSet<u64> = symbols
+        .iter()
+        .filter(|(_, n)| NORETURN_CALLS.contains(&n.as_str()))
+        .map(|(a, _)| *a)
+        .collect();
+    let mut covered: std::collections::BTreeMap<u64, u64> =
+        insts.iter().map(|(a, i)| (*a, a + i.len)).collect();
+    let is_covered = |covered: &std::collections::BTreeMap<u64, u64>, t: u64| {
+        covered
+            .range(..=t)
+            .next_back()
+            .is_some_and(|(_, &end)| t < end)
+    };
+    let mut pending = direct_jump_targets(insts.iter());
+    pending.sort_unstable_by(|a, b| b.cmp(a));
+    let mut fragments = 0;
+    while let Some(target) = pending.pop() {
+        if is_covered(&covered, target) || starts.contains(&target) {
+            continue;
+        }
+        let Some((offset, available)) = segs.iter().find_map(|(va, size, fo)| {
+            (target >= *va && target < va + size).then(|| (fo + (target - va), va + size - target))
+        }) else {
+            diagnostics.push(serde_json::json!({
+                "stage": "decode", "code": "unresolved_control_flow",
+                "address": format!("0x{target:x}"),
+                "message": "jump target is outside executable code"
+            }));
+            continue;
+        };
+        if fragments == MAX_FRAGMENTS {
+            diagnostics.push(serde_json::json!({
+                "stage": "decode", "code": "body_truncated",
+                "address": format!("0x{target:x}"),
+                "message": format!("more than {MAX_FRAGMENTS} detached fragments; later ones were not decoded")
+            }));
+            break;
+        }
+        fragments += 1;
+        let first = insts.len();
+        // A `.cold` part's own FDE gives its exact extent.
+        let extent = layout
+            .mid_frame
+            .contains(&target)
+            .then(|| layout.extents.get(&target).map(|end| end - target))
+            .flatten();
+        let limit = available.min(extent.unwrap_or(MAX_FRAGMENT_BYTES));
+        let mut delta = 0u64;
+        loop {
+            let addr = target + delta;
+            if delta > 0
+                && (is_covered(&covered, addr) || (extent.is_none() && starts.contains(&addr)))
+            {
+                break;
+            }
+            if delta >= limit {
+                if extent.is_none() && limit == MAX_FRAGMENT_BYTES {
+                    diagnostics.push(serde_json::json!({
+                        "stage": "decode", "code": "body_truncated",
+                        "address": format!("0x{target:x}"),
+                        "message": format!("detached fragment exceeds {MAX_FRAGMENT_BYTES} bytes")
+                    }));
+                }
+                break;
+            }
+            if let Err(stop) = rsleigh_decompile::budget::decode_step() {
+                diagnostics.push(
+                    serde_json::json!({"stage":stop.stage,"code":"execution_limit","stop":stop}),
+                );
+                return;
+            }
+            let start = (offset + delta) as usize;
+            let end = (offset + limit) as usize;
+            let Some(bytes) = data.get(start..end.min(data.len())) else {
+                break;
+            };
+            let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if raw_operations {
+                    dec.decode_unoptimized(bytes, addr)
+                } else {
+                    dec.decode(bytes, addr)
+                }
+            }));
+            let Ok(Ok(inst)) = decoded else {
+                diagnostics.push(serde_json::json!({
+                    "stage": "decode", "code": "decode_failed",
+                    "address": format!("0x{addr:x}"),
+                    "message": "detached fragment does not decode"
+                }));
+                break;
+            };
+            if inst.len == 0 {
+                break;
+            }
+            let ends = inst.ops.iter().any(|op| match op {
+                PcodeOp::Return { .. } | PcodeOp::BranchInd { .. } => true,
+                PcodeOp::Branch { dest } => dest.space == AddressSpaceId::Ram,
+                PcodeOp::Call { dest } => {
+                    dest.space == AddressSpaceId::Ram && noreturn.contains(&dest.offset)
+                }
+                _ => false,
+            });
+            covered.insert(addr, addr + inst.len);
+            delta += inst.len;
+            insts.push((addr, inst));
+            if ends && extent.is_none() {
+                break;
+            }
+        }
+        let mut found = direct_jump_targets(insts[first..].iter());
+        found.sort_unstable_by(|a, b| b.cmp(a));
+        pending.extend(found);
+    }
 }
 
 fn decompile_func(

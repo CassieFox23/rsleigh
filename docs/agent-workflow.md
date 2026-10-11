@@ -198,7 +198,22 @@ See [output formats and validation](output-formats.md) for all artifact checks.
 Agent modes return `status: ok | partial | failed`. Function records in briefs
 and indexes carry their own status and stage-specific diagnostics. Decode
 errors and caught decompiler panics make surviving evidence `partial`, rather
-than silently substituting an apparently successful empty analysis.
+than silently substituting an apparently successful empty analysis. Cards and
+brief records are also `partial` when the function's pseudocode cannot show all
+of it: `unresolved_control_flow` (an indirect jump such as an unrecovered jump
+table, or a jump into code that is not decodable, with its `address`),
+`body_truncated` (more detached fragments or bytes than the decode bounds
+allow), and `empty_body` (the body prints empty although the P-code calls or
+branches). These describe the function, not the run, so such cards are still
+cached.
+
+A function body is the decode window from its entry (its `.eh_frame` extent
+when an FDE starts there, otherwise up to the next discovered function) plus
+detached code reached by direct jumps that no function claims, such as GCC's
+`.cold` parts, which are recognized by FDEs that begin inside a frame. Jumps to
+another function's entry, and indirect jumps through a slot or function
+pointer, are tail calls and print as `return callee(...)`. Card instructions
+are listed in address order.
 
 Exit codes are 0 for completed analysis, 2 for partial evidence, and 1 for a
 failed command. A partial result remains usable after inspecting its diagnostics.

@@ -476,22 +476,19 @@ fn build_ssa_with_return_register(
                         crate::provenance::rewrite(&mut ssa.vars, vi, rewritten);
                     }
                 }
-                // Also re-link the terminator condition
-                if let SsaTerminator::CBranch {
-                    cond,
-                    taken,
-                    fallthrough,
-                } = &block.terminator
-                {
-                    if let Some(&new_cond) = relink.get(cond) {
-                        let t = *taken;
-                        let f = *fallthrough;
-                        ssa.blocks[bid].terminator = SsaTerminator::CBranch {
-                            cond: new_cond,
-                            taken: t,
-                            fallthrough: f,
-                        };
+                // Also re-link the terminator's operands. A join block that
+                // returns must return the Phi, not whichever predecessor's
+                // value was current when the block was first renamed.
+                let relinked = |v: &mut VarId| {
+                    if let Some(&phi) = relink.get(v) {
+                        *v = phi;
                     }
+                };
+                match &mut block.terminator {
+                    SsaTerminator::CBranch { cond, .. } => relinked(cond),
+                    SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => relinked(v),
+                    SsaTerminator::Call { args, .. } => args.iter_mut().for_each(relinked),
+                    _ => {}
                 }
             }
 
