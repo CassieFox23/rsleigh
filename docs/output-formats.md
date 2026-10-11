@@ -23,7 +23,7 @@ legacy modes do not.
 | `--verify-index DIR` | One JSON object | `rsleigh.index-verification/v1`; validity and analysis status |
 | `--ssa-slice FUNCTION` with a root selector | One JSON object | `rsleigh.ssa-slice/v3`; bounded dependencies, boundaries, and resolved `selection` |
 | `FUNCTION --card ...` | Text by default; JSON with `--json` | `rsleigh.card/v2`; evidence references and independent pagination |
-| `--xrefs FUNCTION` | Text by default; JSON with `--json` | `rsleigh.xrefs/v1`; `callers` with per-caller `call_sites`, pseudocode `callees` and `strings`, `limits.truncated_scans` |
+| `--xrefs FUNCTION` | Text by default; JSON with `--json` | `rsleigh.xrefs/v1`; `callers` with per-caller `call_sites` and `tail_calls`, pseudocode `callees` and `strings`, `limits.truncated_scans` |
 | `--search QUERY [--api\|--const\|--tag]` | Text by default; JSON with `--json` | `rsleigh.search/v1`; `query`, `kind`, `results` with `match_type`, `limits.truncated_scans` |
 | `--pcode-json FUNCTION` | One JSON object per requested function | `rsleigh.pcode/v2`; `function`, `address`, `instructions`, typed raw operations |
 | `--ssa-json FUNCTION` | One JSON object per requested function | `function`, `address`, `blocks`, `vars` |

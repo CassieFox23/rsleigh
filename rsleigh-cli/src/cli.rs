@@ -4215,8 +4215,9 @@ type LookupError = (&'static str, String);
 struct Xrefs {
     name: String,
     address: u64,
-    /// One entry per direct call site: (caller address, caller name).
-    call_sites: Vec<(u64, String)>,
+    /// One entry per direct call site: (caller address, caller name, whether
+    /// the site is a tail call, a jump rather than a call).
+    call_sites: Vec<(u64, String, bool)>,
     callees: Vec<String>,
     strings: Vec<String>,
     pseudocode: String,
@@ -4403,12 +4404,16 @@ fn collect_xrefs(binary_path: &str, data: &[u8], target_name: &str) -> Result<Xr
                     // UI honest across architectures.
                     let dis = &inst.disassembly;
                     let dis_lower = dis.to_ascii_lowercase();
-                    if dis_lower.starts_with("call ") || dis_lower.starts_with("bl ") {
+                    let call = dis_lower.starts_with("call ") || dis_lower.starts_with("bl ");
+                    // A direct jump to the target from another function is
+                    // a tail call: x86 `jmp`, ARM `b`.
+                    let tail = dis_lower.starts_with("jmp ") || dis_lower.starts_with("b ");
+                    if call || tail {
                         if let Some(target_str) = dis.split_whitespace().nth(1) {
                             if let Some(hex) = target_str.strip_prefix("0x") {
                                 if let Ok(addr) = u64::from_str_radix(hex, 16) {
                                     if call_targets.contains(&addr) {
-                                        callers.push((func_addr.clone(), func_name.clone()));
+                                        callers.push((*func_addr, func_name.clone(), tail));
                                     }
                                 }
                             }
@@ -4443,17 +4448,23 @@ fn print_xrefs(xrefs: &Xrefs) {
     println!();
     let mut caller_counts: std::collections::BTreeMap<(u64, String), usize> =
         std::collections::BTreeMap::new();
-    for (addr, name) in &xrefs.call_sites {
+    for (addr, name, _) in &xrefs.call_sites {
         *caller_counts.entry((*addr, name.clone())).or_insert(0) += 1;
     }
     let n_callers = caller_counts.len();
     let n_sites = xrefs.call_sites.len();
+    let n_tail = xrefs.call_sites.iter().filter(|(_, _, tail)| *tail).count();
     println!(
-        "Called by ({} {}, {} call site{}):",
+        "Called by ({} {}, {} call site{}{}):",
         n_callers,
         if n_callers == 1 { "caller" } else { "callers" },
         n_sites,
-        if n_sites == 1 { "" } else { "s" }
+        if n_sites == 1 { "" } else { "s" },
+        if n_tail > 0 {
+            format!(", {n_tail} of them tail calls")
+        } else {
+            String::new()
+        }
     );
     if caller_counts.is_empty() {
         println!("  (none found — may be called indirectly or is entry point)");

@@ -44,22 +44,26 @@ pub(super) fn xrefs(binary_path: &str, data: &[u8], args: &[String]) -> Result<u
         print_xrefs(&xrefs);
         return Ok(status_exit(status));
     }
-    let mut callers: std::collections::BTreeMap<(u64, &str), usize> =
+    // (call sites, of which tail calls) per caller
+    let mut callers: std::collections::BTreeMap<(u64, &str), (usize, usize)> =
         std::collections::BTreeMap::new();
-    for (address, name) in &xrefs.call_sites {
-        *callers.entry((*address, name.as_str())).or_default() += 1;
+    for (address, name, tail) in &xrefs.call_sites {
+        let entry = callers.entry((*address, name.as_str())).or_default();
+        entry.0 += 1;
+        entry.1 += usize::from(*tail);
     }
     emit(&json!({
         "schema":"rsleigh.xrefs/v1", "status":status, "tool_version":env!("CARGO_PKG_VERSION"),
         "file":{"sha256":compute_sha256(data)},
         "function":{"name":xrefs.name, "address":format!("0x{:x}", xrefs.address)},
-        "callers":callers.iter().map(|((address, name), sites)| json!({
+        "callers":callers.iter().map(|((address, name), (sites, tail_calls))| json!({
             "address":format!("0x{address:x}"), "name":name, "call_sites":sites,
+            "tail_calls":tail_calls,
         })).collect::<Vec<_>>(),
         "call_sites":xrefs.call_sites.len(),
         "callees":xrefs.callees, "strings":xrefs.strings,
         "derivation":{
-            "callers":"direct call instructions to the function or its import stub",
+            "callers":"direct calls and tail-call jumps to the function or its import stub",
             "callees":"call expressions in the function's pseudocode (hypothesis)",
             "strings":"string literals in the function's pseudocode",
         },
