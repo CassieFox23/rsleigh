@@ -370,6 +370,58 @@ pub(super) const OPERATIONS: &[Operation] = &[
         ],
     },
     Operation {
+        id: "xrefs",
+        mode: value(
+            "--xrefs",
+            Kind::Function,
+            "FUNCTION",
+            "Function whose callers, callees, and strings to report",
+        ),
+        schema: "rsleigh.xrefs/v1",
+        summary: "Direct callers of one function, plus the callees and strings in its pseudocode",
+        target: Target::Binary,
+        positional: None,
+        flags: &[
+            switch("--json", "Emit rsleigh.xrefs/v1 JSON instead of text").role(Role::Output),
+        ],
+        effects: &[("reads_binary", "always")],
+        limits: &[("scan_bytes_per_function", XREF_SCAN_BYTES as u64)],
+        examples: &[Example {
+            argv: &["FILE", "--xrefs", "FUNCTION", "--json"],
+            exits: EXIT_EVIDENCE,
+            description: "Who calls this function, and what it calls",
+        }],
+    },
+    Operation {
+        id: "search",
+        mode: switch("--search", "Select the function search operation"),
+        schema: "rsleigh.search/v1",
+        summary: "Functions that use a string, call an API, contain a constant, or carry a behavior tag",
+        target: Target::Binary,
+        positional: Some("QUERY"),
+        flags: &[
+            switch("--api", "Match functions that call the API named by QUERY"),
+            switch("--const", "Match functions whose bytes contain the constant QUERY"),
+            switch("--tag", "Match functions tagged with any of the comma-separated QUERY tags"),
+            switch("--decompile", "Include each match's pseudocode (hypothesis)"),
+            switch("--json", "Emit rsleigh.search/v1 JSON instead of text").role(Role::Output),
+        ],
+        effects: &[("reads_binary", "always")],
+        limits: &[("scan_bytes_per_function", XREF_SCAN_BYTES as u64)],
+        examples: &[
+            Example {
+                argv: &["FILE", "--search", "password", "--json"],
+                exits: EXIT_EVIDENCE,
+                description: "Functions that reference a string",
+            },
+            Example {
+                argv: &["FILE", "--search", "--api", "recv", "--json"],
+                exits: EXIT_EVIDENCE,
+                description: "Functions that call an API",
+            },
+        ],
+    },
+    Operation {
         id: "index",
         mode: value(
             "--index",

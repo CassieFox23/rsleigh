@@ -523,6 +523,7 @@ mod contracts;
 mod evidence;
 mod index;
 mod investigation;
+mod lookup;
 mod mcp;
 mod slice;
 
@@ -798,7 +799,7 @@ fn run_agent_brief(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8
         .map(|f| {
             let address = format!("0x{:x}", f.address);
             [
-                vec!["--xrefs", &address],
+                vec!["--xrefs", &address, "--json"],
                 vec![&address, "--card", "--json", "--pcode"],
                 vec!["--ssa-json", &address],
             ]
@@ -853,6 +854,8 @@ fn run_operation(
             value_arg(args, "--verify-index")?.expect("validated mode value"),
         ),
         "card" => card::run(&args[1], binary()?, args),
+        "xrefs" => lookup::xrefs(&args[1], binary()?, args),
+        "search" => lookup::search(&args[1], binary()?, args),
         "ssa-slice" => slice::run(binary()?, args),
         "export-bundle" => bundle::export(binary()?, args),
         "compare" => compare::run(&args[1], binary()?, args),
@@ -898,6 +901,14 @@ pub(super) fn dispatch(args: &[String]) -> bool {
             .collect()
     };
     if selected.is_empty() && !target_free {
+        return false;
+    }
+    if args.iter().any(|a| a == "--raw")
+        && !selected.is_empty()
+        && selected
+            .iter()
+            .all(|op| lookup::RAW_LEGACY.contains(&op.id))
+    {
         return false;
     }
     let (code, _) = invoke(selected, args.to_vec(), target_free, false);

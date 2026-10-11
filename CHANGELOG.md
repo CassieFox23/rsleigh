@@ -51,6 +51,13 @@ All notable user-facing changes to rsleigh are documented here.
   `__TEXT` vmaddr), as Ghidra reports it, not the first executable section.
   It is part of evidence subject identity, so content IDs for ELF and Mach-O
   records differ from earlier builds; existing records still verify.
+- `--xrefs` and `--search` are catalog operations, also served over MCP. They
+  print text as before; `--json` emits `rsleigh.xrefs/v1` (callers with call
+  site counts) and `rsleigh.search/v1`. Unknown flags are now rejected with
+  `unsupported_option`. A function longer than the 4,096-byte scan window makes
+  the result `partial` (exit 2) and is counted in `limits.truncated_scans`.
+  `--raw` input keeps the raw-image output. The agent brief's suggested xrefs
+  command now asks for JSON.
 
 ## [0.5.0] - 2026-09-07
 
