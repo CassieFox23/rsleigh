@@ -4,6 +4,8 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-12
+
 ### Fixed
 
 - `rsleigh-generate` output is byte-identical across runs. Token readers and
@@ -197,7 +199,8 @@ All notable user-facing changes to rsleigh are documented here.
 - Reduced false-positive ARM function discovery and added ARM-to-Thumb call
   discovery.
 
-[Unreleased]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.2...v0.4.3
