@@ -57,3 +57,38 @@ lhs: r0 is left=0 { local value:4 = r0 + 1; export value; }
         }
     }
 }
+
+#[test]
+fn repeated_generation_is_byte_identical() {
+    // Several token fields and an OR pattern whose branches produce tuples of
+    // tables and fields: all of these came from HashMaps and were emitted in
+    // a different order on each run, so builds were not reproducible.
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "rsleigh-byte-identical-{}.slaspec",
+        std::process::id()
+    )));
+    fs::write(
+        &fixture.0,
+        r#"
+define endian=little;
+define space ram type=ram_space size=4 default;
+define space register type=register_space size=4;
+define register offset=0 size=4 [ r0 r1 r2 ];
+define token instr(16) opcode=(0,3) left=(4,5) right=(6,7) imm=(8,11) mode=(12,15);
+rhs: r1 is right=0 { local value:4 = r1 + 2; export value; }
+lhs: r0 is left=0 { local value:4 = r0 + 1; export value; }
+:"mix" lhs,rhs is opcode=0 & lhs & rhs { r2 = lhs + rhs; }
+:"alt" lhs,rhs,imm is (opcode=1 & lhs & rhs & imm) | (opcode=2 & lhs & rhs & imm & mode=1) { r2 = lhs + rhs + imm; }
+"#,
+    )
+    .unwrap();
+    let first = rsleigh::codegen::generate_disassembler(&fixture.0)
+        .unwrap()
+        .to_string();
+    for _ in 0..24 {
+        let again = rsleigh::codegen::generate_disassembler(&fixture.0)
+            .unwrap()
+            .to_string();
+        assert!(again == first, "generated code changed after a fresh parse");
+    }
+}

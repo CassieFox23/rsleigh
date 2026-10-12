@@ -78,7 +78,10 @@ impl TokenFieldFunctions {
     }
 
     pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
-        for (key, value) in self.functions.iter() {
+        // Emit in token field order; map order differs between runs.
+        let mut functions: Vec<_> = self.functions.iter().collect();
+        functions.sort_by_key(|(_, function)| function.ids[0].0);
+        for (key, value) in functions {
             let TokenFieldKey {
                 bits,
                 token_bytes,
