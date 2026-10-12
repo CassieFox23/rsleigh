@@ -579,6 +579,75 @@ fn emit_region(
                     continue;
                 }
 
+                // A recovered jump table dispatches through a chain of
+                // `index == k` tests, one block per case. Nesting each test in
+                // the previous one's else branch hit MAX_STRUCTURE_DEPTH after
+                // about 250 cases, so walk the chain and emit one switch.
+                if let Some(chain) = jump_table_chain(ssa, current, emitted) {
+                    let merge = pdom[current.0];
+                    let merge_valid = merge.0 < emitted.len();
+                    let merge_was_emitted = !merge_valid || emitted[merge.0];
+                    if merge_valid {
+                        emitted[merge.0] = true;
+                    }
+                    for test in &chain.tests {
+                        emitted[test.0] = true;
+                    }
+                    // Entries that share a target share one case body; a
+                    // second, empty case would fall through to the next.
+                    let mut groups: Vec<(Vec<i64>, BlockId)> = Vec::new();
+                    for (k, target) in &chain.cases {
+                        match groups.iter_mut().find(|(_, t)| t == target) {
+                            Some((values, _)) => values.push(*k),
+                            None => groups.push((vec![*k], *target)),
+                        }
+                    }
+                    // The last edge needs no test (the bounds check ran); a
+                    // group with the same target is part of it.
+                    groups.retain(|(_, target)| *target != chain.last);
+                    let mut emit_case = |target: BlockId, emitted: &mut Vec<bool>| {
+                        let mut body = Vec::new();
+                        if target != merge {
+                            let tail = shared_tail(ssa, back_edges, target, merge, emitted);
+                            for b in tail.iter().flatten() {
+                                emitted[b.0] = false;
+                            }
+                            emit_region(
+                                ssa,
+                                cfg,
+                                dom,
+                                pdom,
+                                back_edges,
+                                target,
+                                emitted,
+                                &mut body,
+                                depth + 1,
+                                None,
+                                consumed,
+                            );
+                            for b in tail.iter().flatten() {
+                                emitted[b.0] = true;
+                            }
+                        }
+                        body
+                    };
+                    let cases = groups
+                        .into_iter()
+                        .map(|(values, target)| (values, emit_case(target, emitted)))
+                        .collect();
+                    let default = emit_case(chain.last, emitted);
+                    if merge_valid {
+                        emitted[merge.0] = merge_was_emitted;
+                    }
+                    out.push(StructuredStmt::Switch {
+                        expr: chain.var,
+                        cases,
+                        default,
+                    });
+                    current = merge;
+                    continue;
+                }
+
                 // if/else: check if taken and fallthrough reconverge.
                 // The post-dominator is the merge point; bound branch recursion
                 // at it by temporarily marking it emitted. Without this guard,
@@ -828,6 +897,62 @@ fn emit_region(
             }
         }
     }
+}
+
+/// The `index == k` test chain `cfg` builds for a recovered jump table.
+struct JumpTableChain {
+    var: VarId,
+    /// The test blocks, the first being the jump's own block.
+    tests: Vec<BlockId>,
+    /// (k, target) for each tested case, in table order.
+    cases: Vec<(i64, BlockId)>,
+    /// The target of the final, untested edge.
+    last: BlockId,
+}
+
+/// The jump-table chain starting at `start`, if its tests use the temporaries
+/// `cfg::switch_chain` creates and the later tests hold nothing else.
+fn jump_table_chain(ssa: &SsaCfg, start: BlockId, emitted: &[bool]) -> Option<JumpTableChain> {
+    let mut chain = JumpTableChain {
+        var: VarId(0),
+        tests: Vec::new(),
+        cases: Vec::new(),
+        last: start,
+    };
+    let mut at = start;
+    loop {
+        let Some(SsaTerminator::CBranch {
+            cond,
+            taken,
+            fallthrough,
+        }) = ssa.blocks.get(at.0).map(|b| &b.terminator)
+        else {
+            break;
+        };
+        let tag = ssa.var(*cond).varnode;
+        if tag.space != pcode_ir::AddressSpaceId::Unique || tag.offset >> 61 != 3 {
+            break;
+        }
+        let Some((var, k, true)) = extract_eq_const(*cond, ssa) else {
+            break;
+        };
+        if chain.tests.is_empty() {
+            chain.var = var;
+        } else if !same_test_var(var, chain.var, ssa)
+            || emitted[at.0]
+            || !ssa.blocks[at.0]
+                .stmts
+                .iter()
+                .all(|s| matches!(s, Stmt::Assign(v) if v == cond))
+        {
+            break;
+        }
+        chain.tests.push(at);
+        chain.cases.push((k, *taken));
+        at = *fallthrough;
+    }
+    chain.last = at;
+    (chain.cases.len() >= 3).then_some(chain)
 }
 
 /// The blocks of a short straight-line path from an already-emitted `start`

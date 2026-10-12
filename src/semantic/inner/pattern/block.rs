@@ -121,8 +121,12 @@ impl Block {
         else {
             unreachable!()
         };
-        let token_fields = base.token_fields.into_values().collect();
-        let tables = base.tables.into_values().collect();
+        // Generated code follows these lists; map order differs between runs.
+        let mut token_fields: Vec<_> = base.token_fields.into_values().collect();
+        token_fields.sort_by_key(|field| field.field.0);
+        let mut tables: Vec<_> = base.tables.into_values().collect();
+        tables.sort_by_key(|table| table.table.0);
+        let (token_fields, tables) = (token_fields.into(), tables.into());
         let verifications = base
             .verifications
             .into_iter()

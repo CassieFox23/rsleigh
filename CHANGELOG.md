@@ -4,6 +4,14 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- `rsleigh-generate` output is byte-identical across runs. Token readers and
+  pattern operand lists were emitted in hash-map order, so two builds of the
+  same source differed.
+- A recovered jump table with more than about 250 entries prints every case.
+  The `switch` for Debian `ls`'s 277-entry table stopped after case 253.
+
 ## [0.6.0] - 2026-10-11
 
 ### Added
