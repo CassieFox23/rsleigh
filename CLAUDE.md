@@ -107,6 +107,7 @@ bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
 
 - Subtable cache: `lift()` once per subtable, results cached. Implicitly built operands emit their ops up front; a subtable with an explicit `build` statement emits at that statement (`gen_build`). x86-64 `MOV r32` zero extension and ARM LDM/STM address updates depend on it; regenerate (`cargo run -p rsleigh-generate`) after codegen changes
 - Unique offset scheme: parent uses `(num_fields*2+2)*0x10000` to avoid subtable-export collision
+- Generated output must be byte-identical across runs: pattern HashMaps are sorted by id at `Block::convert` and token readers by field id (`tests/codegen_lift_order.rs`). Sort any new HashMap iteration that reaches emitted code
 - `dynamic_value_expr()` resolves aliased token fields by bit position (r32/r64 share bits 0-2)
 - Signed displacements: cast signed token fields (simm8, simm16) to signed type before i128 widen
 - Const-space refs: `export *[const]:4 simm8` → `Varnode::constant()` (no Load)
@@ -195,7 +196,7 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Type inference: basic + Win32 typedef + interprocedural two-pass + heuristic field names; no constraint-based
 - MBA: SiMBA handles 1-4 var linear; non-linear + 5+ var need synthesis (egg catches some)
 - Some loop conditions not recovered (`while (OF == SF)`)
-- Jump tables: x86-64 PIC and absolute 4/8-byte tables only; ARM/AArch64 tables and signed (non-guarded) indexes stay `unresolved_control_flow`. The table base is traced through up to 512 earlier contiguous instructions (a linear scan, not a reaching-definition pass); a bounds check may declare up to 4096 entries. The printed `switch` for a 277-entry table stops after case 253, most likely at the structurer's depth limit (`MAX_STRUCTURE_DEPTH`, 256; not tested), though the CFG keeps every case
+- Jump tables: x86-64 PIC and absolute 4/8-byte tables only; ARM/AArch64 tables and signed (non-guarded) indexes stay `unresolved_control_flow`. The table base is traced through up to 512 earlier contiguous instructions (a linear scan, not a reaching-definition pass); a bounds check may declare up to 4096 entries.. The structurer walks the `index == k` test chain iteratively (`jump_table_chain`) into one `switch`, so large tables do not hit `MAX_STRUCTURE_DEPTH`
 - x86-32 sequential TEST/JNZ sometimes nests wrong
 - Register-indirect calls across non-trivial CFG (e.g. multi-path conv. through a phi merge) still not resolved; same-function linear cases including cross-block IAT-into-reg now handled (resolve_callind_via_all_ops)
 - ARM32 VFP/NEON: decode OK, FP reg values not fully traced through folding

@@ -30,3 +30,26 @@ fn distant_table_base_gives_an_ok_card_with_both_cases() {
     assert!(text.contains("return 30;"), "{text}");
     assert!(text.contains("return 31;"), "{text}");
 }
+
+#[test]
+fn a_300_entry_table_prints_every_case() {
+    // The `index == k` chain nested one level per case and stopped at the
+    // structurer's depth limit after case 253, dropping entry 299.
+    let out = Command::new(env!("CARGO_BIN_EXE_rsleigh"))
+        .args([FIXTURE, "0x40171b"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("goto"), "{text}");
+    for expected in [
+        "case 0:",
+        "return 50;",
+        "case 1:",
+        "return 51;",
+        "case 298:",
+        "return 52;",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+}
